@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""MuJoCo renderer that outputs to terminal via Kitty image protocol or ASCII fallback."""
+"""MuJoCo renderer that outputs to terminal via Kitty image protocol or ASCII fallback.
+Supports interactive camera orbit via click-and-drag."""
 
 import sys
 import os
@@ -7,6 +8,9 @@ import io
 import time
 import base64
 import shutil
+import select
+import termios
+import tty
 import argparse
 
 import mujoco
@@ -14,53 +18,261 @@ import numpy as np
 from PIL import Image
 
 
+# ── Terminal helpers ──────────────────────────────────────────────────────────
+
 def supports_kitty():
-    """Check if terminal supports Kitty image protocol."""
     return bool(os.environ.get("KITTY_WINDOW_ID") or os.environ.get("TERM") == "xterm-kitty")
 
 
-def render_frame(model, data, renderer, width, height):
-    """Render a single frame from MuJoCo and return as PIL Image."""
-    renderer.update_scene(data)
+class RawTerminal:
+    """Context manager for raw terminal mode with mouse reporting."""
+
+    def __init__(self):
+        self.fd = sys.stdin.fileno()
+        self.old_settings = None
+
+    def __enter__(self):
+        self.old_settings = termios.tcgetattr(self.fd)
+        tty.setraw(self.fd)
+        # Enable SGR extended mouse reporting (button events + drag)
+        sys.stdout.write("\033[?1003h")  # all motion tracking
+        sys.stdout.write("\033[?1006h")  # SGR extended format
+        sys.stdout.write("\033[?25l")    # hide cursor
+        sys.stdout.flush()
+        return self
+
+    def __exit__(self, *args):
+        # Disable mouse reporting, show cursor, restore terminal
+        sys.stdout.write("\033[?1003l")
+        sys.stdout.write("\033[?1006l")
+        sys.stdout.write("\033[?25h")
+        sys.stdout.write("\033[0m")
+        sys.stdout.flush()
+        if self.old_settings:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+
+    def read_available(self):
+        """Read all available bytes without blocking."""
+        data = b""
+        while select.select([self.fd], [], [], 0)[0]:
+            data += os.read(self.fd, 1024)
+        return data
+
+
+def parse_mouse_events(data):
+    """Parse SGR mouse events from raw terminal data.
+
+    SGR format: ESC [ < button ; col ; row M (press/motion)
+                ESC [ < button ; col ; row m (release)
+    Button bits: 0=left, 1=middle, 2=right, 32+=motion, 64+=scroll
+    """
+    events = []
+    text = data.decode("utf-8", errors="ignore")
+    i = 0
+    while i < len(text):
+        # Look for ESC [ <
+        if text[i:i+3] == "\033[<":
+            i += 3
+            end = i
+            while end < len(text) and text[end] not in ("M", "m"):
+                end += 1
+            if end < len(text):
+                parts = text[i:end].split(";")
+                if len(parts) == 3:
+                    try:
+                        button = int(parts[0])
+                        col = int(parts[1])
+                        row = int(parts[2])
+                        pressed = text[end] == "M"
+                        events.append((button, col, row, pressed))
+                    except ValueError:
+                        pass
+                i = end + 1
+            else:
+                i += 1
+        elif text[i] == "q" or text[i] == "\x03":  # q or Ctrl+C
+            events.append(("quit", 0, 0, False))
+            i += 1
+        elif text[i] == "r":
+            events.append(("reset", 0, 0, False))
+            i += 1
+        elif text[i] == " ":
+            events.append(("pause", 0, 0, False))
+            i += 1
+        else:
+            i += 1
+    return events
+
+
+# ── Orbit controllers ────────────────────────────────────────────────────────
+
+class DirectOrbit:
+    """Direct 1:1 mapping from mouse delta to camera angle. No smoothing."""
+
+    def __init__(self, sensitivity=0.5):
+        self.sensitivity = sensitivity
+        self.dragging = False
+        self.last_col = 0
+        self.last_row = 0
+
+    def handle_event(self, button, col, row, pressed, camera):
+        if isinstance(button, str):
+            return
+
+        is_left = (button & 0x03) == 0
+        is_motion = (button & 32) != 0
+
+        if is_left and pressed and not is_motion:
+            # Mouse down
+            self.dragging = True
+            self.last_col = col
+            self.last_row = row
+        elif is_left and is_motion and pressed and self.dragging:
+            # Drag
+            dx = col - self.last_col
+            dy = row - self.last_row
+            camera.azimuth -= dx * self.sensitivity
+            camera.elevation -= dy * self.sensitivity
+            camera.elevation = max(-90, min(90, camera.elevation))
+            self.last_col = col
+            self.last_row = row
+        elif not pressed and (button & 0x03) == 0:
+            # Mouse up
+            self.dragging = False
+
+
+class SmoothOrbit:
+    """Smoothed orbit with exponential decay. Camera glides toward target."""
+
+    def __init__(self, sensitivity=0.5, smoothing=0.15):
+        self.sensitivity = sensitivity
+        self.smoothing = smoothing
+        self.dragging = False
+        self.last_col = 0
+        self.last_row = 0
+        self.target_azimuth = None
+        self.target_elevation = None
+
+    def handle_event(self, button, col, row, pressed, camera):
+        if isinstance(button, str):
+            return
+
+        if self.target_azimuth is None:
+            self.target_azimuth = camera.azimuth
+            self.target_elevation = camera.elevation
+
+        is_left = (button & 0x03) == 0
+        is_motion = (button & 32) != 0
+
+        if is_left and pressed and not is_motion:
+            self.dragging = True
+            self.last_col = col
+            self.last_row = row
+        elif is_left and is_motion and pressed and self.dragging:
+            dx = col - self.last_col
+            dy = row - self.last_row
+            self.target_azimuth -= dx * self.sensitivity
+            self.target_elevation -= dy * self.sensitivity
+            self.target_elevation = max(-90, min(90, self.target_elevation))
+            self.last_col = col
+            self.last_row = row
+        elif not pressed and (button & 0x03) == 0:
+            self.dragging = False
+
+    def update(self, camera):
+        if self.target_azimuth is None:
+            return
+        camera.azimuth += (self.target_azimuth - camera.azimuth) * self.smoothing
+        camera.elevation += (self.target_elevation - camera.elevation) * self.smoothing
+
+
+class MomentumOrbit:
+    """Orbit with momentum — flick to spin, decays over time."""
+
+    def __init__(self, sensitivity=0.5, friction=0.92):
+        self.sensitivity = sensitivity
+        self.friction = friction
+        self.dragging = False
+        self.last_col = 0
+        self.last_row = 0
+        self.vel_az = 0.0
+        self.vel_el = 0.0
+
+    def handle_event(self, button, col, row, pressed, camera):
+        if isinstance(button, str):
+            return
+
+        is_left = (button & 0x03) == 0
+        is_motion = (button & 32) != 0
+
+        if is_left and pressed and not is_motion:
+            self.dragging = True
+            self.last_col = col
+            self.last_row = row
+            self.vel_az = 0.0
+            self.vel_el = 0.0
+        elif is_left and is_motion and pressed and self.dragging:
+            dx = col - self.last_col
+            dy = row - self.last_row
+            self.vel_az = -dx * self.sensitivity
+            self.vel_el = -dy * self.sensitivity
+            camera.azimuth += self.vel_az
+            camera.elevation += self.vel_el
+            camera.elevation = max(-90, min(90, camera.elevation))
+            self.last_col = col
+            self.last_row = row
+        elif not pressed and (button & 0x03) == 0:
+            self.dragging = False
+
+    def update(self, camera):
+        if not self.dragging and (abs(self.vel_az) > 0.01 or abs(self.vel_el) > 0.01):
+            camera.azimuth += self.vel_az
+            camera.elevation += self.vel_el
+            camera.elevation = max(-90, min(90, camera.elevation))
+            self.vel_az *= self.friction
+            self.vel_el *= self.friction
+
+
+ORBIT_CONTROLLERS = {
+    "direct": DirectOrbit,
+    "smooth": SmoothOrbit,
+    "momentum": MomentumOrbit,
+}
+
+
+# ── Rendering ─────────────────────────────────────────────────────────────────
+
+def render_frame(model, data, renderer, camera):
+    renderer.update_scene(data, camera)
     pixels = renderer.render()
     return Image.fromarray(pixels)
 
 
 def display_kitty(img, frame_id=0):
-    """Display image using Kitty image protocol."""
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     payload = base64.b64encode(buf.getvalue()).decode("ascii")
-
-    # Kitty image protocol: transmit + display, overwriting previous frame
-    # a=T: transmit and display, f=100: PNG, i=1: image id, q=2: suppress responses
     chunk_size = 4096
     chunks = [payload[i:i + chunk_size] for i in range(0, len(payload), chunk_size)]
-
-    # Move cursor to top-left for overwrite
     if frame_id > 0:
         sys.stdout.write("\033[H")
-
     for idx, chunk in enumerate(chunks):
         m = 1 if idx < len(chunks) - 1 else 0
         if idx == 0:
             sys.stdout.write(f"\033_Ga=T,f=100,i=1,q=2,m={m};{chunk}\033\\")
         else:
             sys.stdout.write(f"\033_Gm={m};{chunk}\033\\")
-
     sys.stdout.flush()
 
 
 def pixels_to_ascii(img, cols):
-    """Convert PIL Image to ASCII art."""
     ascii_chars = " .:-=+*#%@"
     img_gray = img.convert("L")
     w, h = img_gray.size
     aspect = h / w
-    rows = int(cols * aspect * 0.45)  # terminal chars are ~2x tall as wide
+    rows = int(cols * aspect * 0.45)
     img_resized = img_gray.resize((cols, rows))
     pixels = np.array(img_resized)
-    # Map pixel values to ASCII characters
     indices = (pixels / 255 * (len(ascii_chars) - 1)).astype(int)
     lines = []
     for row in indices:
@@ -69,10 +281,8 @@ def pixels_to_ascii(img, cols):
 
 
 def display_ascii(img, cols, frame_id=0):
-    """Display image as ASCII art."""
     art = pixels_to_ascii(img, cols)
     if frame_id > 0:
-        # Move cursor up to overwrite previous frame
         n_lines = art.count("\n") + 1
         sys.stdout.write(f"\033[{n_lines}A")
     sys.stdout.write(art + "\n")
@@ -80,19 +290,12 @@ def display_ascii(img, cols, frame_id=0):
 
 
 def pixels_to_halfblock(img, cols):
-    """Convert PIL Image to half-block colored characters.
-
-    Each terminal cell represents 2 vertical pixels using the upper half block
-    character (▀). The foreground color is the top pixel, background is the bottom.
-    """
     w, h = img.size
     aspect = h / w
-    # Each row of characters covers 2 pixel rows
     char_rows = int(cols * aspect * 0.45)
     pixel_rows = char_rows * 2
     img_resized = img.resize((cols, pixel_rows))
     pixels = np.array(img_resized)
-
     lines = []
     for y in range(0, pixel_rows, 2):
         line = []
@@ -101,14 +304,12 @@ def pixels_to_halfblock(img, cols):
         for x in range(cols):
             tr, tg, tb = int(top_row[x][0]), int(top_row[x][1]), int(top_row[x][2])
             br, bg, bb = int(bot_row[x][0]), int(bot_row[x][1]), int(bot_row[x][2])
-            # ▀ with fg=top pixel, bg=bottom pixel
             line.append(f"\033[38;2;{tr};{tg};{tb};48;2;{br};{bg};{bb}m\u2580")
         lines.append("".join(line) + "\033[0m")
     return "\n".join(lines)
 
 
 def display_halfblock(img, cols, frame_id=0):
-    """Display image using half-block colored characters."""
     art = pixels_to_halfblock(img, cols)
     if frame_id > 0:
         n_lines = art.count("\n") + 1
@@ -117,31 +318,28 @@ def display_halfblock(img, cols, frame_id=0):
     sys.stdout.flush()
 
 
+# ── Scenes ────────────────────────────────────────────────────────────────────
+
 SCENES = {}
 
 SCENES["drop"] = """
 <mujoco model="demo">
   <option gravity="0 0 -9.81" timestep="0.002"/>
-
   <visual>
     <global offwidth="640" offheight="480"/>
     <headlight ambient="0.3 0.3 0.3" diffuse="0.8 0.8 0.8"/>
   </visual>
-
   <worldbody>
     <light pos="0 -1 2" dir="0 1 -1" diffuse="1 1 1"/>
     <geom type="plane" size="2 2 0.1" rgba="0.3 0.3 0.35 1"/>
-
     <body name="ball" pos="0 0 1.5">
       <joint type="free"/>
       <geom type="sphere" size="0.1" rgba="0.9 0.2 0.2 1" mass="1"/>
     </body>
-
     <body name="box" pos="0.4 0 0.15">
       <joint type="free"/>
       <geom type="box" size="0.1 0.1 0.1" rgba="0.2 0.6 0.9 1" mass="0.5"/>
     </body>
-
     <body name="capsule" pos="-0.3 0.2 0.8">
       <joint type="free"/>
       <geom type="capsule" size="0.06" fromto="0 0 -0.15 0 0 0.15" rgba="0.2 0.9 0.3 1" mass="0.8"/>
@@ -153,28 +351,20 @@ SCENES["drop"] = """
 SCENES["pendulum"] = """
 <mujoco model="pendulum">
   <option gravity="0 0 -9.81" timestep="0.002"/>
-
   <visual>
     <global offwidth="640" offheight="480"/>
     <headlight ambient="0.4 0.4 0.4" diffuse="0.8 0.8 0.8"/>
   </visual>
-
   <worldbody>
     <light pos="0 -2 3" dir="0 1 -1" diffuse="1 1 1"/>
     <geom type="plane" size="2 2 0.1" rgba="0.25 0.25 0.3 1"/>
-
-    <!-- Pivot point -->
     <site name="pivot" pos="0 0 1.5" size="0.03" rgba="1 1 1 1"/>
-
     <body name="upper" pos="0 0 1.5">
       <joint name="hinge1" type="hinge" axis="0 1 0" damping="0.02"/>
       <geom type="capsule" fromto="0 0 0 0 0 -0.5" size="0.03" rgba="0.9 0.3 0.1 1" mass="1"/>
-
       <body name="lower" pos="0 0 -0.5">
         <joint name="hinge2" type="hinge" axis="0 1 0" damping="0.02"/>
         <geom type="capsule" fromto="0 0 0 0 0 -0.5" size="0.03" rgba="0.2 0.6 0.9 1" mass="1"/>
-
-        <!-- Bob -->
         <body name="bob" pos="0 0 -0.5">
           <geom type="sphere" size="0.08" rgba="0.9 0.8 0.1 1" mass="2"/>
         </body>
@@ -185,15 +375,19 @@ SCENES["pendulum"] = """
 """
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(description="MuJoCo terminal renderer")
     parser.add_argument("--mode", choices=["auto", "kitty", "block", "ascii"], default="auto",
-                        help="Render mode: kitty (image protocol), block (half-block color), ascii (grayscale). Default: auto-detect")
+                        help="Render mode (default: auto-detect)")
+    parser.add_argument("--orbit", choices=list(ORBIT_CONTROLLERS.keys()), default="direct",
+                        help="Orbit style: direct (1:1), smooth (interpolated), momentum (flick to spin)")
     parser.add_argument("--width", type=int, default=640, help="Render width in pixels")
     parser.add_argument("--height", type=int, default=480, help="Render height in pixels")
-    parser.add_argument("--cols", type=int, default=None, help="ASCII art columns (default: terminal width)")
+    parser.add_argument("--cols", type=int, default=None, help="Terminal columns (default: auto)")
     parser.add_argument("--fps", type=float, default=30, help="Target FPS")
-    parser.add_argument("--duration", type=float, default=10, help="Duration in seconds (0=infinite)")
+    parser.add_argument("--duration", type=float, default=0, help="Duration in seconds (0=infinite)")
     parser.add_argument("--xml", type=str, default=None, help="Path to MuJoCo XML model")
     parser.add_argument("--scene", type=str, default="pendulum", choices=list(SCENES.keys()),
                         help="Built-in scene (default: pendulum)")
@@ -201,26 +395,21 @@ def main():
 
     # Determine render mode
     if args.mode == "auto":
-        if supports_kitty():
-            render_mode = "kitty"
-        else:
-            render_mode = "block"
+        render_mode = "kitty" if supports_kitty() else "block"
     else:
         render_mode = args.mode
 
     if render_mode != "kitty" and args.cols is None:
         args.cols = min(shutil.get_terminal_size().columns, 120)
 
-    mode_names = {"kitty": "Kitty image protocol", "block": f"half-block color ({args.cols} cols)", "ascii": f"ASCII ({args.cols} cols)"}
-    mode_name = mode_names[render_mode]
-    print(f"MuJoCo Terminal Renderer — {mode_name}")
-    print(f"Rendering at {args.width}x{args.height}, {args.fps} FPS")
-    print("Press Ctrl+C to stop\n")
+    mode_names = {
+        "kitty": "Kitty image protocol",
+        "block": f"half-block color ({args.cols} cols)",
+        "ascii": f"ASCII ({args.cols} cols)",
+    }
+    print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}")
+    print(f"Orbit: {args.orbit} | Drag to orbit | Space=pause | R=reset | Q=quit")
     time.sleep(1)
-
-    # Clear screen
-    sys.stdout.write("\033[2J\033[H")
-    sys.stdout.flush()
 
     # Load model
     if args.xml:
@@ -230,54 +419,93 @@ def main():
 
     data = mujoco.MjData(model)
 
-    # Start pendulum displaced so it swings
     if not args.xml and args.scene == "pendulum":
-        data.qpos[0] = np.pi / 2  # upper arm 90 degrees
-        data.qpos[1] = np.pi / 4  # lower arm 45 degrees
+        data.qpos[0] = np.pi / 2
+        data.qpos[1] = np.pi / 4
         mujoco.mj_forward(model, data)
+
+    # Save initial state for reset
+    qpos0 = data.qpos.copy()
+    qvel0 = data.qvel.copy()
 
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
 
-    # Simulation loop
+    # Set up camera
+    camera = mujoco.MjvCamera()
+    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+    camera.distance = 3.0
+    camera.azimuth = 90
+    camera.elevation = -20
+    camera.lookat[:] = [0, 0, 0.8]
+
+    # Orbit controller
+    orbit = ORBIT_CONTROLLERS[args.orbit]()
+
     frame_interval = 1.0 / args.fps
     steps_per_frame = max(1, int(frame_interval / model.opt.timestep))
     frame_id = 0
+    paused = False
     t_start = time.time()
 
-    try:
-        while True:
-            # Step physics
-            for _ in range(steps_per_frame):
-                mujoco.mj_step(model, data)
+    # Clear screen
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
 
-            # Render
-            img = render_frame(model, data, renderer, args.width, args.height)
+    with RawTerminal() as term:
+        try:
+            while True:
+                # Read input
+                raw = term.read_available()
+                if raw:
+                    events = parse_mouse_events(raw)
+                    for ev in events:
+                        if ev[0] == "quit":
+                            raise KeyboardInterrupt
+                        elif ev[0] == "reset":
+                            data.qpos[:] = qpos0
+                            data.qvel[:] = qvel0
+                            mujoco.mj_forward(model, data)
+                        elif ev[0] == "pause":
+                            paused = not paused
+                        else:
+                            orbit.handle_event(*ev, camera)
 
-            if render_mode == "kitty":
-                display_kitty(img, frame_id)
-            elif render_mode == "block":
-                display_halfblock(img, args.cols, frame_id)
-            else:
-                display_ascii(img, args.cols, frame_id)
+                # Update orbit controller (smooth/momentum)
+                if hasattr(orbit, "update"):
+                    orbit.update(camera)
 
-            frame_id += 1
+                # Step physics
+                if not paused:
+                    for _ in range(steps_per_frame):
+                        mujoco.mj_step(model, data)
 
-            # Timing
-            elapsed = time.time() - t_start
-            if args.duration > 0 and elapsed >= args.duration:
-                break
+                # Render
+                img = render_frame(model, data, renderer, camera)
 
-            expected = frame_id * frame_interval
-            sleep_time = expected - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+                if render_mode == "kitty":
+                    display_kitty(img, frame_id)
+                elif render_mode == "block":
+                    display_halfblock(img, args.cols, frame_id)
+                else:
+                    display_ascii(img, args.cols, frame_id)
 
-    except KeyboardInterrupt:
-        pass
+                frame_id += 1
+
+                # Timing
+                elapsed = time.time() - t_start
+                if args.duration > 0 and elapsed >= args.duration:
+                    break
+
+                expected = frame_id * frame_interval
+                sleep_time = expected - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        except KeyboardInterrupt:
+            pass
 
     elapsed = time.time() - t_start
     avg_fps = frame_id / elapsed if elapsed > 0 else 0
-    # Move below rendered content
     sys.stdout.write("\n\n")
     print(f"Done — {frame_id} frames in {elapsed:.1f}s ({avg_fps:.1f} FPS avg)")
     renderer.close()
