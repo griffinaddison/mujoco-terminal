@@ -79,6 +79,44 @@ def display_ascii(img, cols, frame_id=0):
     sys.stdout.flush()
 
 
+def pixels_to_halfblock(img, cols):
+    """Convert PIL Image to half-block colored characters.
+
+    Each terminal cell represents 2 vertical pixels using the upper half block
+    character (▀). The foreground color is the top pixel, background is the bottom.
+    """
+    w, h = img.size
+    aspect = h / w
+    # Each row of characters covers 2 pixel rows
+    char_rows = int(cols * aspect * 0.45)
+    pixel_rows = char_rows * 2
+    img_resized = img.resize((cols, pixel_rows))
+    pixels = np.array(img_resized)
+
+    lines = []
+    for y in range(0, pixel_rows, 2):
+        line = []
+        top_row = pixels[y]
+        bot_row = pixels[y + 1] if y + 1 < pixel_rows else top_row
+        for x in range(cols):
+            tr, tg, tb = int(top_row[x][0]), int(top_row[x][1]), int(top_row[x][2])
+            br, bg, bb = int(bot_row[x][0]), int(bot_row[x][1]), int(bot_row[x][2])
+            # ▀ with fg=top pixel, bg=bottom pixel
+            line.append(f"\033[38;2;{tr};{tg};{tb};48;2;{br};{bg};{bb}m\u2580")
+        lines.append("".join(line) + "\033[0m")
+    return "\n".join(lines)
+
+
+def display_halfblock(img, cols, frame_id=0):
+    """Display image using half-block colored characters."""
+    art = pixels_to_halfblock(img, cols)
+    if frame_id > 0:
+        n_lines = art.count("\n") + 1
+        sys.stdout.write(f"\033[{n_lines}A")
+    sys.stdout.write(art + "\n")
+    sys.stdout.flush()
+
+
 SCENES = {}
 
 SCENES["drop"] = """
@@ -149,8 +187,8 @@ SCENES["pendulum"] = """
 
 def main():
     parser = argparse.ArgumentParser(description="MuJoCo terminal renderer")
-    parser.add_argument("--mode", choices=["auto", "kitty", "ascii"], default="auto",
-                        help="Render mode (default: auto-detect)")
+    parser.add_argument("--mode", choices=["auto", "kitty", "block", "ascii"], default="auto",
+                        help="Render mode: kitty (image protocol), block (half-block color), ascii (grayscale). Default: auto-detect")
     parser.add_argument("--width", type=int, default=640, help="Render width in pixels")
     parser.add_argument("--height", type=int, default=480, help="Render height in pixels")
     parser.add_argument("--cols", type=int, default=None, help="ASCII art columns (default: terminal width)")
@@ -163,14 +201,18 @@ def main():
 
     # Determine render mode
     if args.mode == "auto":
-        use_kitty = supports_kitty()
+        if supports_kitty():
+            render_mode = "kitty"
+        else:
+            render_mode = "block"
     else:
-        use_kitty = args.mode == "kitty"
+        render_mode = args.mode
 
-    if not use_kitty and args.cols is None:
+    if render_mode != "kitty" and args.cols is None:
         args.cols = min(shutil.get_terminal_size().columns, 120)
 
-    mode_name = "Kitty image protocol" if use_kitty else f"ASCII ({args.cols} cols)"
+    mode_names = {"kitty": "Kitty image protocol", "block": f"half-block color ({args.cols} cols)", "ascii": f"ASCII ({args.cols} cols)"}
+    mode_name = mode_names[render_mode]
     print(f"MuJoCo Terminal Renderer — {mode_name}")
     print(f"Rendering at {args.width}x{args.height}, {args.fps} FPS")
     print("Press Ctrl+C to stop\n")
@@ -211,8 +253,10 @@ def main():
             # Render
             img = render_frame(model, data, renderer, args.width, args.height)
 
-            if use_kitty:
+            if render_mode == "kitty":
                 display_kitty(img, frame_id)
+            elif render_mode == "block":
+                display_halfblock(img, args.cols, frame_id)
             else:
                 display_ascii(img, args.cols, frame_id)
 
