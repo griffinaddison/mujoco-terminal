@@ -79,7 +79,9 @@ def display_ascii(img, cols, frame_id=0):
     sys.stdout.flush()
 
 
-DEMO_XML = """
+SCENES = {}
+
+SCENES["drop"] = """
 <mujoco model="demo">
   <option gravity="0 0 -9.81" timestep="0.002"/>
 
@@ -92,22 +94,53 @@ DEMO_XML = """
     <light pos="0 -1 2" dir="0 1 -1" diffuse="1 1 1"/>
     <geom type="plane" size="2 2 0.1" rgba="0.3 0.3 0.35 1"/>
 
-    <!-- Bouncing ball -->
     <body name="ball" pos="0 0 1.5">
       <joint type="free"/>
       <geom type="sphere" size="0.1" rgba="0.9 0.2 0.2 1" mass="1"/>
     </body>
 
-    <!-- Box -->
     <body name="box" pos="0.4 0 0.15">
       <joint type="free"/>
       <geom type="box" size="0.1 0.1 0.1" rgba="0.2 0.6 0.9 1" mass="0.5"/>
     </body>
 
-    <!-- Capsule -->
     <body name="capsule" pos="-0.3 0.2 0.8">
       <joint type="free"/>
       <geom type="capsule" size="0.06" fromto="0 0 -0.15 0 0 0.15" rgba="0.2 0.9 0.3 1" mass="0.8"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+SCENES["pendulum"] = """
+<mujoco model="pendulum">
+  <option gravity="0 0 -9.81" timestep="0.002"/>
+
+  <visual>
+    <global offwidth="640" offheight="480"/>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.8 0.8 0.8"/>
+  </visual>
+
+  <worldbody>
+    <light pos="0 -2 3" dir="0 1 -1" diffuse="1 1 1"/>
+    <geom type="plane" size="2 2 0.1" rgba="0.25 0.25 0.3 1"/>
+
+    <!-- Pivot point -->
+    <site name="pivot" pos="0 0 1.5" size="0.03" rgba="1 1 1 1"/>
+
+    <body name="upper" pos="0 0 1.5">
+      <joint name="hinge1" type="hinge" axis="0 1 0" damping="0.02"/>
+      <geom type="capsule" fromto="0 0 0 0 0 -0.5" size="0.03" rgba="0.9 0.3 0.1 1" mass="1"/>
+
+      <body name="lower" pos="0 0 -0.5">
+        <joint name="hinge2" type="hinge" axis="0 1 0" damping="0.02"/>
+        <geom type="capsule" fromto="0 0 0 0 0 -0.5" size="0.03" rgba="0.2 0.6 0.9 1" mass="1"/>
+
+        <!-- Bob -->
+        <body name="bob" pos="0 0 -0.5">
+          <geom type="sphere" size="0.08" rgba="0.9 0.8 0.1 1" mass="2"/>
+        </body>
+      </body>
     </body>
   </worldbody>
 </mujoco>
@@ -124,6 +157,8 @@ def main():
     parser.add_argument("--fps", type=float, default=30, help="Target FPS")
     parser.add_argument("--duration", type=float, default=10, help="Duration in seconds (0=infinite)")
     parser.add_argument("--xml", type=str, default=None, help="Path to MuJoCo XML model")
+    parser.add_argument("--scene", type=str, default="pendulum", choices=list(SCENES.keys()),
+                        help="Built-in scene (default: pendulum)")
     args = parser.parse_args()
 
     # Determine render mode
@@ -149,9 +184,16 @@ def main():
     if args.xml:
         model = mujoco.MjModel.from_xml_path(args.xml)
     else:
-        model = mujoco.MjModel.from_xml_string(DEMO_XML)
+        model = mujoco.MjModel.from_xml_string(SCENES[args.scene])
 
     data = mujoco.MjData(model)
+
+    # Start pendulum displaced so it swings
+    if not args.xml and args.scene == "pendulum":
+        data.qpos[0] = np.pi / 2  # upper arm 90 degrees
+        data.qpos[1] = np.pi / 4  # lower arm 45 degrees
+        mujoco.mj_forward(model, data)
+
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
 
     # Simulation loop
