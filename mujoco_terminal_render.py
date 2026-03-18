@@ -149,13 +149,11 @@ ORBIT_SENSITIVITY = 3.0
 def render_frame(model, data, renderer, camera):
     renderer.update_scene(data, camera)
     pixels = renderer.render()
-    return Image.fromarray(pixels)
+    return pixels
 
 
-def display_kitty(img, frame_id=0):
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    payload = base64.b64encode(buf.getvalue()).decode("ascii")
+def _kitty_chunked_write(payload, header_params, frame_id):
+    """Write a kitty image protocol payload in chunks."""
     chunk_size = 4096
     chunks = [payload[i:i + chunk_size] for i in range(0, len(payload), chunk_size)]
     if frame_id > 0:
@@ -163,29 +161,69 @@ def display_kitty(img, frame_id=0):
     for idx, chunk in enumerate(chunks):
         m = 1 if idx < len(chunks) - 1 else 0
         if idx == 0:
-            sys.stdout.write(f"\033_Ga=T,f=100,i=1,q=2,m={m};{chunk}\033\\")
+            sys.stdout.write(f"\033_G{header_params},q=2,m={m};{chunk}\033\\")
         else:
             sys.stdout.write(f"\033_Gm={m};{chunk}\033\\")
     sys.stdout.flush()
 
 
-def pixels_to_ascii(img, cols):
+def display_kitty_png(pixels, frame_id=0):
+    """Kitty via PNG. Good compression, moderate encode cost."""
+    img = Image.fromarray(pixels)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", compress_level=1)
+    payload = base64.b64encode(buf.getvalue()).decode("ascii")
+    _kitty_chunked_write(payload, "a=T,f=100,i=1", frame_id)
+
+
+
+def display_kitty_raw(pixels, frame_id=0):
+    """Kitty via raw RGB. No encode overhead, larger payload."""
+    h, w = pixels.shape[:2]
+    payload = base64.b64encode(pixels.tobytes()).decode("ascii")
+    _kitty_chunked_write(payload, f"a=T,f=24,s={w},v={h},i=1", frame_id)
+
+
+def display_kitty_png_fast(pixels, frame_id=0):
+    """Kitty via PNG with zero compression. Fast encode, larger file."""
+    img = Image.fromarray(pixels)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", compress_level=0)
+    payload = base64.b64encode(buf.getvalue()).decode("ascii")
+    _kitty_chunked_write(payload, "a=T,f=100,i=1", frame_id)
+
+
+def display_kitty_raw_zlib(pixels, frame_id=0):
+    """Kitty via zlib-compressed raw RGB. Good balance of speed and size."""
+    import zlib
+    h, w = pixels.shape[:2]
+    compressed = zlib.compress(pixels.tobytes(), level=1)
+    payload = base64.b64encode(compressed).decode("ascii")
+    _kitty_chunked_write(payload, f"a=T,f=24,s={w},v={h},o=z,i=1", frame_id)
+
+
+KITTY_ENCODINGS = {
+    "png": display_kitty_png,
+    "png-fast": display_kitty_png_fast,
+    "raw": display_kitty_raw,
+    "raw-zlib": display_kitty_raw_zlib,
+}
+
+
+def display_ascii(pixels, cols, frame_id=0):
     ascii_chars = " .:-=+*#%@"
+    img = Image.fromarray(pixels)
     img_gray = img.convert("L")
     w, h = img_gray.size
     aspect = h / w
     rows = int(cols * aspect * 0.45)
     img_resized = img_gray.resize((cols, rows))
-    pixels = np.array(img_resized)
-    indices = (pixels / 255 * (len(ascii_chars) - 1)).astype(int)
+    arr = np.array(img_resized)
+    indices = (arr / 255 * (len(ascii_chars) - 1)).astype(int)
     lines = []
     for row in indices:
         lines.append("".join(ascii_chars[i] for i in row))
-    return "\n".join(lines)
-
-
-def display_ascii(img, cols, frame_id=0):
-    art = pixels_to_ascii(img, cols)
+    art = "\n".join(lines)
     if frame_id > 0:
         n_lines = art.count("\n") + 1
         sys.stdout.write(f"\033[{n_lines}A")
@@ -193,28 +231,25 @@ def display_ascii(img, cols, frame_id=0):
     sys.stdout.flush()
 
 
-def pixels_to_halfblock(img, cols):
+def display_halfblock(pixels, cols, frame_id=0):
+    img = Image.fromarray(pixels)
     w, h = img.size
     aspect = h / w
     char_rows = int(cols * aspect * 0.45)
     pixel_rows = char_rows * 2
     img_resized = img.resize((cols, pixel_rows))
-    pixels = np.array(img_resized)
+    arr = np.array(img_resized)
     lines = []
     for y in range(0, pixel_rows, 2):
         line = []
-        top_row = pixels[y]
-        bot_row = pixels[y + 1] if y + 1 < pixel_rows else top_row
+        top_row = arr[y]
+        bot_row = arr[y + 1] if y + 1 < pixel_rows else top_row
         for x in range(cols):
             tr, tg, tb = int(top_row[x][0]), int(top_row[x][1]), int(top_row[x][2])
             br, bg, bb = int(bot_row[x][0]), int(bot_row[x][1]), int(bot_row[x][2])
             line.append(f"\033[38;2;{tr};{tg};{tb};48;2;{br};{bg};{bb}m\u2580")
         lines.append("".join(line) + "\033[0m")
-    return "\n".join(lines)
-
-
-def display_halfblock(img, cols, frame_id=0):
-    art = pixels_to_halfblock(img, cols)
+    art = "\n".join(lines)
     if frame_id > 0:
         n_lines = art.count("\n") + 1
         sys.stdout.write(f"\033[{n_lines}A")
@@ -290,6 +325,8 @@ def main():
     parser.add_argument("--cols", type=int, default=None, help="Terminal columns (default: auto)")
     parser.add_argument("--fps", type=float, default=30, help="Target FPS")
     parser.add_argument("--duration", type=float, default=0, help="Duration in seconds (0=infinite)")
+    parser.add_argument("--encoding", choices=list(KITTY_ENCODINGS.keys()), default="png",
+                        help="Kitty image encoding: png (default), png-fast (no compression), raw (uncompressed RGB), raw-zlib (zlib-compressed RGB)")
     parser.add_argument("--xml", type=str, default=None, help="Path to MuJoCo XML model")
     parser.add_argument("--scene", type=str, default="pendulum", choices=list(SCENES.keys()),
                         help="Built-in scene (default: pendulum)")
@@ -309,7 +346,8 @@ def main():
         "block": f"half-block color ({args.cols} cols)",
         "ascii": f"ASCII ({args.cols} cols)",
     }
-    print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}")
+    enc_label = f" [{args.encoding}]" if render_mode == "kitty" else ""
+    print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}{enc_label}")
     print(f"Drag to orbit | Space=pause | R=reset | Q=quit")
     time.sleep(1)
 
@@ -344,6 +382,9 @@ def main():
     camera.elevation = -20
     camera.lookat[:] = [0, 0, 0.8]
 
+    # Kitty encoding function
+    kitty_display = KITTY_ENCODINGS[args.encoding]
+
     # Orbit controller
     orbit = DirectOrbit(sensitivity=ORBIT_SENSITIVITY)
 
@@ -364,8 +405,6 @@ def main():
     with RawTerminal() as term:
         try:
             while True:
-                t_frame_start = time.time()
-
                 # Read input
                 raw = term.read_available()
                 if raw:
@@ -391,14 +430,14 @@ def main():
                         sim_time += physics_dt
 
                 # Render
-                img = render_frame(model, data, renderer, camera)
+                pixels = render_frame(model, data, renderer, camera)
 
                 if render_mode == "kitty":
-                    display_kitty(img, frame_id)
+                    kitty_display(pixels, frame_id)
                 elif render_mode == "block":
-                    display_halfblock(img, args.cols, frame_id)
+                    display_halfblock(pixels, args.cols, frame_id)
                 else:
-                    display_ascii(img, args.cols, frame_id)
+                    display_ascii(pixels, args.cols, frame_id)
 
                 # Metrics
                 t_now = time.time()
