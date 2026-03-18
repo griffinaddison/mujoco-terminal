@@ -348,10 +348,14 @@ def main():
     orbit = DirectOrbit(sensitivity=ORBIT_SENSITIVITY)
 
     frame_interval = 1.0 / args.fps
-    steps_per_frame = max(1, int(frame_interval / model.opt.timestep))
+    # Physics runs at real-time regardless of render FPS
+    physics_dt = model.opt.timestep
     frame_id = 0
     paused = False
+    sim_time = 0.0
     t_start = time.time()
+    t_last_frame = t_start
+    fps_smooth = args.fps  # exponential moving average
 
     # Clear screen
     sys.stdout.write("\033[2J\033[H")
@@ -360,6 +364,8 @@ def main():
     with RawTerminal() as term:
         try:
             while True:
+                t_frame_start = time.time()
+
                 # Read input
                 raw = term.read_available()
                 if raw:
@@ -370,16 +376,19 @@ def main():
                         elif ev[0] == "reset":
                             data.qpos[:] = qpos0
                             data.qvel[:] = qvel0
+                            sim_time = 0.0
                             mujoco.mj_forward(model, data)
                         elif ev[0] == "pause":
                             paused = not paused
                         else:
                             orbit.handle_event(*ev, camera)
 
-                # Step physics
+                # Step physics to keep up with real time
                 if not paused:
-                    for _ in range(steps_per_frame):
+                    wall_elapsed = time.time() - t_start
+                    while sim_time < wall_elapsed:
                         mujoco.mj_step(model, data)
+                        sim_time += physics_dt
 
                 # Render
                 img = render_frame(model, data, renderer, camera)
@@ -391,15 +400,29 @@ def main():
                 else:
                     display_ascii(img, args.cols, frame_id)
 
+                # Metrics
+                t_now = time.time()
+                dt = t_now - t_last_frame
+                instant_fps = 1.0 / dt if dt > 0 else 0
+                fps_smooth = fps_smooth * 0.9 + instant_fps * 0.1
+                wall_elapsed = t_now - t_start
+                realtime_factor = sim_time / wall_elapsed if wall_elapsed > 0 else 0
+                status = f" FPS: {fps_smooth:5.1f} | Sim: {sim_time:6.2f}s | RT: {realtime_factor:.2f}x "
+                if paused:
+                    status += "| PAUSED "
+                # Write status line below render area
+                sys.stdout.write(f"\033[0m\033[K{status}\r")
+                sys.stdout.flush()
+                t_last_frame = t_now
+
                 frame_id += 1
 
                 # Timing
-                elapsed = time.time() - t_start
-                if args.duration > 0 and elapsed >= args.duration:
+                if args.duration > 0 and wall_elapsed >= args.duration:
                     break
 
-                expected = frame_id * frame_interval
-                sleep_time = expected - elapsed
+                expected = t_start + frame_id * frame_interval
+                sleep_time = expected - time.time()
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
