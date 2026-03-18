@@ -141,102 +141,11 @@ class DirectOrbit:
             self.dragging = False
 
 
-class SmoothOrbit:
-    """Smoothed orbit with exponential decay. Camera glides toward target."""
-
-    def __init__(self, sensitivity=0.5, smoothing=0.15):
-        self.sensitivity = sensitivity
-        self.smoothing = smoothing
-        self.dragging = False
-        self.last_col = 0
-        self.last_row = 0
-        self.target_azimuth = None
-        self.target_elevation = None
-
-    def handle_event(self, button, col, row, pressed, camera):
-        if isinstance(button, str):
-            return
-
-        if self.target_azimuth is None:
-            self.target_azimuth = camera.azimuth
-            self.target_elevation = camera.elevation
-
-        is_left = (button & 0x03) == 0
-        is_motion = (button & 32) != 0
-
-        if is_left and pressed and not is_motion:
-            self.dragging = True
-            self.last_col = col
-            self.last_row = row
-        elif is_left and is_motion and pressed and self.dragging:
-            dx = col - self.last_col
-            dy = row - self.last_row
-            self.target_azimuth -= dx * self.sensitivity
-            self.target_elevation -= dy * self.sensitivity
-            self.target_elevation = max(-90, min(90, self.target_elevation))
-            self.last_col = col
-            self.last_row = row
-        elif not pressed and (button & 0x03) == 0:
-            self.dragging = False
-
-    def update(self, camera):
-        if self.target_azimuth is None:
-            return
-        camera.azimuth += (self.target_azimuth - camera.azimuth) * self.smoothing
-        camera.elevation += (self.target_elevation - camera.elevation) * self.smoothing
-
-
-class MomentumOrbit:
-    """Orbit with momentum — flick to spin, decays over time."""
-
-    def __init__(self, sensitivity=0.5, friction=0.92):
-        self.sensitivity = sensitivity
-        self.friction = friction
-        self.dragging = False
-        self.last_col = 0
-        self.last_row = 0
-        self.vel_az = 0.0
-        self.vel_el = 0.0
-
-    def handle_event(self, button, col, row, pressed, camera):
-        if isinstance(button, str):
-            return
-
-        is_left = (button & 0x03) == 0
-        is_motion = (button & 32) != 0
-
-        if is_left and pressed and not is_motion:
-            self.dragging = True
-            self.last_col = col
-            self.last_row = row
-            self.vel_az = 0.0
-            self.vel_el = 0.0
-        elif is_left and is_motion and pressed and self.dragging:
-            dx = col - self.last_col
-            dy = row - self.last_row
-            self.vel_az = -dx * self.sensitivity
-            self.vel_el = -dy * self.sensitivity
-            camera.azimuth += self.vel_az
-            camera.elevation += self.vel_el
-            camera.elevation = max(-90, min(90, camera.elevation))
-            self.last_col = col
-            self.last_row = row
-        elif not pressed and (button & 0x03) == 0:
-            self.dragging = False
-
-    def update(self, camera):
-        if not self.dragging and (abs(self.vel_az) > 0.01 or abs(self.vel_el) > 0.01):
-            camera.azimuth += self.vel_az
-            camera.elevation += self.vel_el
-            camera.elevation = max(-90, min(90, camera.elevation))
-            self.vel_az *= self.friction
-            self.vel_el *= self.friction
-
-
-ORBIT_CONTROLLERS = {
-    "direct": DirectOrbit,
-    "smooth": SmoothOrbit,
-    "momentum": MomentumOrbit,
+SENSITIVITY_LEVELS = {
+    "low": 1.0,
+    "medium": 2.0,
+    "high": 4.0,
+    "ultra": 8.0,
 }
 
 
@@ -381,8 +290,8 @@ def main():
     parser = argparse.ArgumentParser(description="MuJoCo terminal renderer")
     parser.add_argument("--mode", choices=["auto", "kitty", "block", "ascii"], default="auto",
                         help="Render mode (default: auto-detect)")
-    parser.add_argument("--orbit", choices=list(ORBIT_CONTROLLERS.keys()), default="direct",
-                        help="Orbit style: direct (1:1), smooth (interpolated), momentum (flick to spin)")
+    parser.add_argument("--sensitivity", choices=list(SENSITIVITY_LEVELS.keys()), default="low",
+                        help="Orbit sensitivity: low (1x), medium (2x), high (4x), ultra (8x)")
     parser.add_argument("--width", type=int, default=640, help="Render width in pixels")
     parser.add_argument("--height", type=int, default=480, help="Render height in pixels")
     parser.add_argument("--cols", type=int, default=None, help="Terminal columns (default: auto)")
@@ -408,7 +317,7 @@ def main():
         "ascii": f"ASCII ({args.cols} cols)",
     }
     print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}")
-    print(f"Orbit: {args.orbit} | Drag to orbit | Space=pause | R=reset | Q=quit")
+    print(f"Sensitivity: {args.sensitivity} | Drag to orbit | Space=pause | R=reset | Q=quit")
     time.sleep(1)
 
     # Load model
@@ -439,7 +348,7 @@ def main():
     camera.lookat[:] = [0, 0, 0.8]
 
     # Orbit controller
-    orbit = ORBIT_CONTROLLERS[args.orbit]()
+    orbit = DirectOrbit(sensitivity=SENSITIVITY_LEVELS[args.sensitivity])
 
     frame_interval = 1.0 / args.fps
     steps_per_frame = max(1, int(frame_interval / model.opt.timestep))
@@ -469,10 +378,6 @@ def main():
                             paused = not paused
                         else:
                             orbit.handle_event(*ev, camera)
-
-                # Update orbit controller (smooth/momentum)
-                if hasattr(orbit, "update"):
-                    orbit.update(camera)
 
                 # Step physics
                 if not paused:
