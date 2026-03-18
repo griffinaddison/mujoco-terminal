@@ -1,0 +1,14 @@
+[project]
+name = "mujoco-terminal"
+version = "0.1.0"
+description = "MuJoCo renderer for terminal output via Kitty image protocol or ASCII"
+requires-python = ">=3.9"
+license = "MIT"
+dependencies = [
+    "mujoco>=3.0",
+    "pillow",
+    "numpy",
+]
+
+[project.scripts]
+mujoco-terminal = "mujoco_terminal_render:main"
