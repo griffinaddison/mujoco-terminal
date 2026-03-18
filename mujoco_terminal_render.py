@@ -319,6 +319,10 @@ def main():
     else:
         model = mujoco.MjModel.from_xml_string(SCENES[args.scene])
 
+    # Ensure offscreen framebuffer is large enough for requested resolution
+    model.vis.global_.offwidth = max(model.vis.global_.offwidth, args.width)
+    model.vis.global_.offheight = max(model.vis.global_.offheight, args.height)
+
     data = mujoco.MjData(model)
 
     if not args.xml and args.scene == "pendulum":
