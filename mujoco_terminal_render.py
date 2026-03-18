@@ -141,12 +141,7 @@ class DirectOrbit:
             self.dragging = False
 
 
-SENSITIVITY_LEVELS = {
-    "low": 1.0,
-    "medium": 2.0,
-    "high": 4.0,
-    "ultra": 8.0,
-}
+ORBIT_SENSITIVITY = 3.0
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
@@ -290,8 +285,6 @@ def main():
     parser = argparse.ArgumentParser(description="MuJoCo terminal renderer")
     parser.add_argument("--mode", choices=["auto", "kitty", "block", "ascii"], default="auto",
                         help="Render mode (default: auto-detect)")
-    parser.add_argument("--sensitivity", choices=list(SENSITIVITY_LEVELS.keys()), default="low",
-                        help="Orbit sensitivity: low (1x), medium (2x), high (4x), ultra (8x)")
     parser.add_argument("--width", type=int, default=640, help="Render width in pixels")
     parser.add_argument("--height", type=int, default=480, help="Render height in pixels")
     parser.add_argument("--cols", type=int, default=None, help="Terminal columns (default: auto)")
@@ -317,7 +310,7 @@ def main():
         "ascii": f"ASCII ({args.cols} cols)",
     }
     print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}")
-    print(f"Sensitivity: {args.sensitivity} | Drag to orbit | Space=pause | R=reset | Q=quit")
+    print(f"Drag to orbit | Space=pause | R=reset | Q=quit")
     time.sleep(1)
 
     # Load model
@@ -348,7 +341,7 @@ def main():
     camera.lookat[:] = [0, 0, 0.8]
 
     # Orbit controller
-    orbit = DirectOrbit(sensitivity=SENSITIVITY_LEVELS[args.sensitivity])
+    orbit = DirectOrbit(sensitivity=ORBIT_SENSITIVITY)
 
     frame_interval = 1.0 / args.fps
     steps_per_frame = max(1, int(frame_interval / model.opt.timestep))
