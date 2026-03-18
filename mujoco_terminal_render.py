@@ -202,11 +202,21 @@ def display_kitty_raw_zlib(pixels, frame_id=0):
     _kitty_chunked_write(payload, f"a=T,f=24,s={w},v={h},o=z,i=1", frame_id)
 
 
+def display_kitty_jpeg(pixels, frame_id=0):
+    """Kitty via JPEG. Not in official spec but some terminals support it."""
+    img = Image.fromarray(pixels)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=80)
+    payload = base64.b64encode(buf.getvalue()).decode("ascii")
+    _kitty_chunked_write(payload, "a=T,f=100,i=1", frame_id)
+
+
 KITTY_ENCODINGS = {
     "png": display_kitty_png,
     "png-fast": display_kitty_png_fast,
     "raw": display_kitty_raw,
     "raw-zlib": display_kitty_raw_zlib,
+    "jpeg": display_kitty_jpeg,
 }
 
 
@@ -323,7 +333,7 @@ def main():
     parser.add_argument("--width", type=int, default=640, help="Render width in pixels")
     parser.add_argument("--height", type=int, default=480, help="Render height in pixels")
     parser.add_argument("--cols", type=int, default=None, help="Terminal columns (default: auto)")
-    parser.add_argument("--fps", type=float, default=30, help="Target FPS")
+    parser.add_argument("--fps", type=float, default=60, help="Target FPS (0=uncapped)")
     parser.add_argument("--duration", type=float, default=0, help="Duration in seconds (0=infinite)")
     parser.add_argument("--encoding", choices=list(KITTY_ENCODINGS.keys()), default="png",
                         help="Kitty image encoding: png (default), png-fast (no compression), raw (uncompressed RGB), raw-zlib (zlib-compressed RGB)")
@@ -388,7 +398,7 @@ def main():
     # Orbit controller
     orbit = DirectOrbit(sensitivity=ORBIT_SENSITIVITY)
 
-    frame_interval = 1.0 / args.fps
+    frame_interval = 1.0 / args.fps if args.fps > 0 else 0
     # Physics runs at real-time regardless of render FPS
     physics_dt = model.opt.timestep
     frame_id = 0
@@ -460,10 +470,11 @@ def main():
                 if args.duration > 0 and wall_elapsed >= args.duration:
                     break
 
-                expected = t_start + frame_id * frame_interval
-                sleep_time = expected - time.time()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+                if frame_interval > 0:
+                    expected = t_start + frame_id * frame_interval
+                    sleep_time = expected - time.time()
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
 
         except KeyboardInterrupt:
             pass
