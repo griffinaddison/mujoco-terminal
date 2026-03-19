@@ -429,6 +429,7 @@ def main():
     t_last_frame = t_start
     fps_smooth = args.fps  # exponential moving average
     frame_times = [] if args.benchmark else None
+    resize_pending = None
 
     # Clear screen
     sys.stdout.write("\033[2J\033[H")
@@ -461,10 +462,14 @@ def main():
                         mujoco.mj_step(model, data)
                         sim_time += physics_dt
 
-                # Render — detect terminal resize
+                # Render — detect terminal resize (debounced)
                 cur_term_size = shutil.get_terminal_size()
                 if cur_term_size != prev_term_size:
                     prev_term_size = cur_term_size
+                    resize_pending = time.perf_counter()
+                if resize_pending and time.perf_counter() - resize_pending > 0.15:
+                    resize_pending = None
+                    cur_term_size = shutil.get_terminal_size()
                     if dynamic_cols and render_mode != "kitty":
                         args.cols = cur_term_size.columns - 1
                     sys.stdout.write("\033[2J\033[H")
