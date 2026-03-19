@@ -274,8 +274,8 @@ ORBIT_SENSITIVITY = 3.0
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
-def render_frame(model, data, renderer, camera):
-    renderer.update_scene(data, camera)
+def render_frame(model, data, renderer, camera, scene_option=None, perturb=None):
+    renderer.update_scene(data, camera, scene_option=scene_option, scene_perturb=perturb)
     pixels = renderer.render()
     return pixels
 
@@ -582,7 +582,8 @@ def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,
                 term_rows = cur_term_size.lines - 1  # leave room for status
                 img_aspect = height / width
 
-                pixels = render_frame(model, data, renderer, camera)
+                pixels = render_frame(model, data, renderer, camera,
+                                      scene_option=opt, perturb=pert)
 
                 if render_mode == "kitty":
                     max_cols = int(term_rows / img_aspect * 2)
