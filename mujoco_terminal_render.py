@@ -367,7 +367,8 @@ def main():
     else:
         render_mode = args.mode
 
-    if render_mode != "kitty" and args.cols is None:
+    dynamic_cols = render_mode != "kitty" and args.cols is None
+    if dynamic_cols:
         args.cols = min(shutil.get_terminal_size().columns - 1, 120)
 
     mode_names = {
@@ -460,6 +461,8 @@ def main():
                         sim_time += physics_dt
 
                 # Render
+                if dynamic_cols:
+                    args.cols = min(shutil.get_terminal_size().columns - 1, 120)
                 pixels = render_frame(model, data, renderer, camera)
 
                 if render_mode == "kitty":
