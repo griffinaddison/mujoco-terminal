@@ -175,48 +175,53 @@ def _kitty_chunked_write(payload, header_params, frame_id):
     sys.stdout.flush()
 
 
-def display_kitty_png(pixels, frame_id=0):
+def display_kitty_png(pixels, frame_id=0, display_cols=0):
     """Kitty via PNG. Good compression, moderate encode cost."""
     img = Image.fromarray(pixels)
     buf = io.BytesIO()
     img.save(buf, format="PNG", compress_level=1)
     payload = base64.b64encode(buf.getvalue()).decode("ascii")
-    _kitty_chunked_write(payload, "a=T,f=100,i=1", frame_id)
+    cols_param = f",c={display_cols}" if display_cols > 0 else ""
+    _kitty_chunked_write(payload, f"a=T,f=100,i=1{cols_param}", frame_id)
 
 
 
-def display_kitty_raw(pixels, frame_id=0):
+def display_kitty_raw(pixels, frame_id=0, display_cols=0):
     """Kitty via raw RGB. No encode overhead, larger payload."""
     h, w = pixels.shape[:2]
     payload = base64.b64encode(pixels.tobytes()).decode("ascii")
-    _kitty_chunked_write(payload, f"a=T,f=24,s={w},v={h},i=1", frame_id)
+    cols_param = f",c={display_cols}" if display_cols > 0 else ""
+    _kitty_chunked_write(payload, f"a=T,f=24,s={w},v={h},i=1{cols_param}", frame_id)
 
 
-def display_kitty_png_fast(pixels, frame_id=0):
+def display_kitty_png_fast(pixels, frame_id=0, display_cols=0):
     """Kitty via PNG with zero compression. Fast encode, larger file."""
     img = Image.fromarray(pixels)
     buf = io.BytesIO()
     img.save(buf, format="PNG", compress_level=0)
     payload = base64.b64encode(buf.getvalue()).decode("ascii")
-    _kitty_chunked_write(payload, "a=T,f=100,i=1", frame_id)
+    cols_param = f",c={display_cols}" if display_cols > 0 else ""
+    _kitty_chunked_write(payload, f"a=T,f=100,i=1{cols_param}", frame_id)
 
 
-def display_kitty_raw_zlib(pixels, frame_id=0):
+def display_kitty_raw_zlib(pixels, frame_id=0, display_cols=0):
     """Kitty via zlib-compressed raw RGB. Good balance of speed and size."""
     import zlib
     h, w = pixels.shape[:2]
     compressed = zlib.compress(pixels.tobytes(), level=1)
     payload = base64.b64encode(compressed).decode("ascii")
-    _kitty_chunked_write(payload, f"a=T,f=24,s={w},v={h},o=z,i=1", frame_id)
+    cols_param = f",c={display_cols}" if display_cols > 0 else ""
+    _kitty_chunked_write(payload, f"a=T,f=24,s={w},v={h},o=z,i=1{cols_param}", frame_id)
 
 
-def display_kitty_jpeg(pixels, frame_id=0):
+def display_kitty_jpeg(pixels, frame_id=0, display_cols=0):
     """Kitty via JPEG. Not in official spec but some terminals support it."""
     img = Image.fromarray(pixels)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=80)
     payload = base64.b64encode(buf.getvalue()).decode("ascii")
-    _kitty_chunked_write(payload, "a=T,f=100,i=1", frame_id)
+    cols_param = f",c={display_cols}" if display_cols > 0 else ""
+    _kitty_chunked_write(payload, f"a=T,f=100,i=1{cols_param}", frame_id)
 
 
 KITTY_ENCODINGS = {
@@ -467,18 +472,24 @@ def main():
                 if cur_term_size != prev_term_size:
                     prev_term_size = cur_term_size
                     resize_pending = time.perf_counter()
-                if resize_pending and time.perf_counter() - resize_pending > 0.15:
-                    resize_pending = None
-                    cur_term_size = shutil.get_terminal_size()
-                    if dynamic_cols and render_mode != "kitty":
-                        args.cols = cur_term_size.columns - 1
-                    sys.stdout.write("\033[2J\033[H")
-                    sys.stdout.flush()
-                    frame_id = 0
+                if resize_pending:
+                    if time.perf_counter() - resize_pending > 0.15:
+                        resize_pending = None
+                        cur_term_size = shutil.get_terminal_size()
+                        if dynamic_cols:
+                            args.cols = cur_term_size.columns - 1
+                        sys.stdout.write("\033[2J\033[H")
+                        sys.stdout.flush()
+                        frame_id = 0
+                    else:
+                        # Skip rendering during resize
+                        continue
+
                 pixels = render_frame(model, data, renderer, camera)
+                kitty_cols = shutil.get_terminal_size().columns
 
                 if render_mode == "kitty":
-                    kitty_display(pixels, frame_id)
+                    kitty_display(pixels, frame_id, display_cols=kitty_cols)
                 elif render_mode == "block":
                     display_halfblock(pixels, args.cols, frame_id)
                 else:
