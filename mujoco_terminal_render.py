@@ -480,21 +480,26 @@ def main():
                     sys.stdout.flush()
                     frame_id = 0
 
+                # Cap cols so rendered height fits in terminal
+                term_rows = cur_term_size.lines - 1  # leave room for status
+                img_aspect = args.height / args.width
+
                 pixels = render_frame(model, data, renderer, camera)
 
                 if render_mode == "kitty":
-                    # Cap display cols so image height fits in terminal
-                    # Cell aspect ~2:1 (cells are taller than wide)
-                    term_cols = cur_term_size.columns
-                    term_rows = cur_term_size.lines - 1  # leave room for status
-                    img_aspect = args.height / args.width
-                    max_cols_for_height = int(term_rows / img_aspect * 2)
-                    display_cols = min(term_cols, max_cols_for_height)
+                    max_cols = int(term_rows / img_aspect * 2)
+                    display_cols = min(cur_term_size.columns, max_cols)
                     kitty_display(pixels, frame_id, display_cols=display_cols)
                 elif render_mode == "block":
-                    display_halfblock(pixels, args.cols, frame_id)
+                    # halfblock: rows = cols * aspect * 0.45, each row = 2 pixel rows
+                    max_cols = int(term_rows / (img_aspect * 0.45))
+                    cols = min(args.cols, max_cols)
+                    display_halfblock(pixels, cols, frame_id)
                 else:
-                    display_ascii(pixels, args.cols, frame_id)
+                    # ascii: rows = cols * aspect * 0.45
+                    max_cols = int(term_rows / (img_aspect * 0.45))
+                    cols = min(args.cols, max_cols)
+                    display_ascii(pixels, cols, frame_id)
 
                 # Metrics
                 t_now = time.perf_counter()
