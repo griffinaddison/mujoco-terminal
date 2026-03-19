@@ -380,94 +380,103 @@ SCENES["pendulum"] = """
 """
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Library API ───────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="MuJoCo terminal renderer")
-    parser.add_argument("--mode", choices=["auto", "kitty", "block", "ascii"], default="auto",
-                        help="Render mode (default: auto-detect)")
-    parser.add_argument("--width", type=int, default=640, help="Render width in pixels")
-    parser.add_argument("--height", type=int, default=480, help="Render height in pixels")
-    parser.add_argument("--cols", type=int, default=None, help="Terminal columns (default: auto)")
-    parser.add_argument("--fps", type=float, default=60, help="Target FPS (0=uncapped)")
-    parser.add_argument("--duration", type=float, default=0, help="Duration in seconds (0=infinite)")
-    parser.add_argument("--encoding", choices=list(KITTY_ENCODINGS.keys()), default="raw-zlib",
-                        help="Kitty image encoding: png (default), png-fast (no compression), raw (uncompressed RGB), raw-zlib (zlib-compressed RGB)")
-    parser.add_argument("--xml", type=str, default=None, help="Path to MuJoCo XML model")
-    parser.add_argument("--scene", type=str, default="pendulum", choices=list(SCENES.keys()),
-                        help="Built-in scene (default: pendulum)")
-    parser.add_argument("--benchmark", action="store_true",
-                        help="Output JSON benchmark stats to stderr on exit")
-    args = parser.parse_args()
+def launch(model, data=None, *, mode="auto", width=640, height=480, fps=60,
+           encoding="raw-zlib", cols=None, camera=None):
+    """Launch an interactive terminal viewer for a MuJoCo model.
+
+    Usage:
+        import mujoco
+        import mujoco_terminal_render as mtr
+
+        model = mujoco.MjModel.from_xml_path("robot.xml")
+        mtr.launch(model)
+
+        # Or with existing data / custom camera:
+        data = mujoco.MjData(model)
+        mtr.launch(model, data, fps=30, mode="kitty")
+
+    Args:
+        model: MjModel instance.
+        data: MjData instance. Created from model if not provided.
+        mode: Render mode — "auto", "kitty", "block", or "ascii".
+        width: Offscreen render width in pixels.
+        height: Offscreen render height in pixels.
+        fps: Target FPS (0 for uncapped).
+        encoding: Kitty encoding — "raw-zlib", "png", "png-fast", "raw", "jpeg".
+        cols: Terminal columns for block/ascii (None = auto-fit).
+        camera: MjvCamera instance. Uses a default free camera if not provided.
+    """
+    _run_viewer(model, data=data, mode=mode, width=width, height=height,
+                fps=fps, encoding=encoding, cols=cols, camera=camera,
+                benchmark=False, duration=0)
+
+
+def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,
+                fps=60, encoding="raw-zlib", cols=None, camera=None,
+                benchmark=False, duration=0):
+    """Internal viewer loop shared by launch() and main()."""
 
     # Determine render mode
-    if args.mode == "auto":
+    if mode == "auto":
         render_mode = "kitty" if supports_kitty() else "block"
     else:
-        render_mode = args.mode
+        render_mode = mode
 
-    dynamic_cols = args.cols is None
+    dynamic_cols = cols is None
     if dynamic_cols and render_mode != "kitty":
-        args.cols = shutil.get_terminal_size().columns - 1
+        cols = shutil.get_terminal_size().columns - 1
     prev_term_size = shutil.get_terminal_size()
 
     mode_names = {
         "kitty": "Kitty image protocol",
-        "block": f"half-block color ({args.cols} cols)",
-        "ascii": f"ASCII ({args.cols} cols)",
+        "block": f"half-block color ({cols} cols)",
+        "ascii": f"ASCII ({cols} cols)",
     }
-    enc_label = f" [{args.encoding}]" if render_mode == "kitty" else ""
+    enc_label = f" [{encoding}]" if render_mode == "kitty" else ""
     print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}{enc_label}")
     print(f"L-drag=orbit | R-drag=pan | Scroll=zoom | Space=pause | R=reset | Q=quit")
     time.sleep(1)
 
-    # Load model
-    if args.xml:
-        model = mujoco.MjModel.from_xml_path(args.xml)
-    else:
-        model = mujoco.MjModel.from_xml_string(SCENES[args.scene])
-
     # Ensure offscreen framebuffer is large enough for requested resolution
-    model.vis.global_.offwidth = max(model.vis.global_.offwidth, args.width)
-    model.vis.global_.offheight = max(model.vis.global_.offheight, args.height)
+    model.vis.global_.offwidth = max(model.vis.global_.offwidth, width)
+    model.vis.global_.offheight = max(model.vis.global_.offheight, height)
 
-    data = mujoco.MjData(model)
-
-    if not args.xml and args.scene == "pendulum":
-        data.qpos[0] = np.pi / 2
-        data.qpos[1] = np.pi / 4
+    if data is None:
+        data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
 
     # Save initial state for reset
     qpos0 = data.qpos.copy()
     qvel0 = data.qvel.copy()
 
-    renderer = mujoco.Renderer(model, height=args.height, width=args.width)
+    renderer = mujoco.Renderer(model, height=height, width=width)
 
     # Set up camera
-    camera = mujoco.MjvCamera()
-    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-    camera.distance = 3.0
-    camera.azimuth = 90
-    camera.elevation = -20
-    camera.lookat[:] = [0, 0, 0.8]
+    if camera is None:
+        camera = mujoco.MjvCamera()
+        camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+        camera.distance = 3.0
+        camera.azimuth = 90
+        camera.elevation = -20
+        camera.lookat[:] = [0, 0, 0.8]
 
     # Kitty encoding function
-    kitty_display = KITTY_ENCODINGS[args.encoding]
+    kitty_display = KITTY_ENCODINGS[encoding]
 
-    # Orbit controller
-    orbit = CameraController(orbit_sensitivity=ORBIT_SENSITIVITY)
+    # Camera controller
+    controller = CameraController(orbit_sensitivity=ORBIT_SENSITIVITY)
 
-    frame_interval = 1.0 / args.fps if args.fps > 0 else 0
-    # Physics runs at real-time regardless of render FPS
+    frame_interval = 1.0 / fps if fps > 0 else 0
     physics_dt = model.opt.timestep
     frame_id = 0
     paused = False
     sim_time = 0.0
     t_start = time.perf_counter()
     t_last_frame = t_start
-    fps_smooth = args.fps  # exponential moving average
-    frame_times = [] if args.benchmark else None
+    fps_smooth = fps  # exponential moving average
+    frame_times = [] if benchmark else None
     resize_pending = None
 
     # Clear screen
@@ -492,7 +501,7 @@ def main():
                         elif ev[0] == "pause":
                             paused = not paused
                         else:
-                            orbit.handle_event(*ev, camera)
+                            controller.handle_event(*ev, camera)
 
                 # Step physics to keep up with real time
                 if not paused:
@@ -509,14 +518,14 @@ def main():
                 if resize_pending and time.perf_counter() - resize_pending > 0.15:
                     resize_pending = None
                     if dynamic_cols:
-                        args.cols = cur_term_size.columns - 1
+                        cols = cur_term_size.columns - 1
                     sys.stdout.write("\033[2J\033[H")
                     sys.stdout.flush()
                     frame_id = 0
 
                 # Cap cols so rendered height fits in terminal
                 term_rows = cur_term_size.lines - 1  # leave room for status
-                img_aspect = args.height / args.width
+                img_aspect = height / width
 
                 pixels = render_frame(model, data, renderer, camera)
 
@@ -525,15 +534,13 @@ def main():
                     display_cols = min(cur_term_size.columns, max_cols)
                     kitty_display(pixels, frame_id, display_cols=display_cols)
                 elif render_mode == "block":
-                    # halfblock: rows = cols * aspect * 0.45, each row = 2 pixel rows
                     max_cols = int(term_rows / (img_aspect * 0.45))
-                    cols = min(args.cols, max_cols)
-                    display_halfblock(pixels, cols, frame_id)
+                    capped_cols = min(cols, max_cols)
+                    display_halfblock(pixels, capped_cols, frame_id)
                 else:
-                    # ascii: rows = cols * aspect * 0.45
                     max_cols = int(term_rows / (img_aspect * 0.45))
-                    cols = min(args.cols, max_cols)
-                    display_ascii(pixels, cols, frame_id)
+                    capped_cols = min(cols, max_cols)
+                    display_ascii(pixels, capped_cols, frame_id)
 
                 # Metrics
                 t_now = time.perf_counter()
@@ -555,7 +562,7 @@ def main():
                 frame_id += 1
 
                 # Timing
-                if args.duration > 0 and wall_elapsed >= args.duration:
+                if duration > 0 and wall_elapsed >= duration:
                     break
 
                 if frame_interval > 0:
@@ -578,8 +585,8 @@ def main():
         fps_arr = 1.0 / ft[ft > 0]
         stats = {
             "mode": render_mode,
-            "encoding": args.encoding if render_mode == "kitty" else None,
-            "resolution": f"{args.width}x{args.height}",
+            "encoding": encoding,
+            "resolution": f"{width}x{height}",
             "frames": len(fps_arr),
             "duration_s": round(elapsed, 2),
             "fps_mean": round(float(np.mean(fps_arr)), 2),
@@ -592,6 +599,44 @@ def main():
         sys.stderr.write(json.dumps(stats) + "\n")
 
     renderer.close()
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="MuJoCo terminal renderer")
+    parser.add_argument("--mode", choices=["auto", "kitty", "block", "ascii"], default="auto",
+                        help="Render mode (default: auto-detect)")
+    parser.add_argument("--width", type=int, default=640, help="Render width in pixels")
+    parser.add_argument("--height", type=int, default=480, help="Render height in pixels")
+    parser.add_argument("--cols", type=int, default=None, help="Terminal columns (default: auto)")
+    parser.add_argument("--fps", type=float, default=60, help="Target FPS (0=uncapped)")
+    parser.add_argument("--duration", type=float, default=0, help="Duration in seconds (0=infinite)")
+    parser.add_argument("--encoding", choices=list(KITTY_ENCODINGS.keys()), default="raw-zlib",
+                        help="Kitty image encoding: raw-zlib (default), png, png-fast, raw, jpeg")
+    parser.add_argument("--xml", type=str, default=None, help="Path to MuJoCo XML model")
+    parser.add_argument("--scene", type=str, default="pendulum", choices=list(SCENES.keys()),
+                        help="Built-in scene (default: pendulum)")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Output JSON benchmark stats to stderr on exit")
+    args = parser.parse_args()
+
+    # Load model
+    if args.xml:
+        model = mujoco.MjModel.from_xml_path(args.xml)
+    else:
+        model = mujoco.MjModel.from_xml_string(SCENES[args.scene])
+
+    data = mujoco.MjData(model)
+
+    if not args.xml and args.scene == "pendulum":
+        data.qpos[0] = np.pi / 2
+        data.qpos[1] = np.pi / 4
+        mujoco.mj_forward(model, data)
+
+    _run_viewer(model, data=data, mode=args.mode, width=args.width,
+                height=args.height, fps=args.fps, encoding=args.encoding,
+                cols=args.cols, benchmark=args.benchmark, duration=args.duration)
 
 
 if __name__ == "__main__":
