@@ -483,7 +483,14 @@ def main():
                 pixels = render_frame(model, data, renderer, camera)
 
                 if render_mode == "kitty":
-                    kitty_display(pixels, frame_id, display_cols=cur_term_size.columns)
+                    # Cap display cols so image height fits in terminal
+                    # Cell aspect ~2:1 (cells are taller than wide)
+                    term_cols = cur_term_size.columns
+                    term_rows = cur_term_size.lines - 1  # leave room for status
+                    img_aspect = args.height / args.width
+                    max_cols_for_height = int(term_rows / img_aspect * 2)
+                    display_cols = min(term_cols, max_cols_for_height)
+                    kitty_display(pixels, frame_id, display_cols=display_cols)
                 elif render_mode == "block":
                     display_halfblock(pixels, args.cols, frame_id)
                 else:
