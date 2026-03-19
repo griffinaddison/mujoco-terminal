@@ -369,7 +369,7 @@ def main():
 
     dynamic_cols = render_mode != "kitty" and args.cols is None
     if dynamic_cols:
-        args.cols = min(shutil.get_terminal_size().columns - 1, 120)
+        args.cols = shutil.get_terminal_size().columns - 1
 
     mode_names = {
         "kitty": "Kitty image protocol",
@@ -462,7 +462,7 @@ def main():
 
                 # Render
                 if dynamic_cols:
-                    new_cols = min(shutil.get_terminal_size().columns - 1, 120)
+                    new_cols = shutil.get_terminal_size().columns - 1
                     if new_cols != args.cols:
                         args.cols = new_cols
                         sys.stdout.write("\033[2J\033[H")
