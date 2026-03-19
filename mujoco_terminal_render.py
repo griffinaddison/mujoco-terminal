@@ -462,7 +462,12 @@ def main():
 
                 # Render
                 if dynamic_cols:
-                    args.cols = min(shutil.get_terminal_size().columns - 1, 120)
+                    new_cols = min(shutil.get_terminal_size().columns - 1, 120)
+                    if new_cols != args.cols:
+                        args.cols = new_cols
+                        sys.stdout.write("\033[2J\033[H")
+                        sys.stdout.flush()
+                        frame_id = 0
                 pixels = render_frame(model, data, renderer, camera)
 
                 if render_mode == "kitty":
