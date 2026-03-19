@@ -109,14 +109,17 @@ def parse_mouse_events(data):
     return events
 
 
-# ── Orbit controllers ────────────────────────────────────────────────────────
+# ── Camera controllers ───────────────────────────────────────────────────────
 
-class DirectOrbit:
-    """Direct 1:1 mapping from mouse delta to camera angle. No smoothing."""
+class CameraController:
+    """Handles orbit (left-drag), pan (right-drag), and zoom (scroll)."""
 
-    def __init__(self, sensitivity=0.5):
-        self.sensitivity = sensitivity
-        self.dragging = False
+    def __init__(self, orbit_sensitivity=0.5, pan_sensitivity=0.02, zoom_sensitivity=0.15):
+        self.orbit_sensitivity = orbit_sensitivity
+        self.pan_sensitivity = pan_sensitivity
+        self.zoom_sensitivity = zoom_sensitivity
+        self.left_dragging = False
+        self.right_dragging = False
         self.last_col = 0
         self.last_row = 0
 
@@ -124,26 +127,57 @@ class DirectOrbit:
         if isinstance(button, str):
             return
 
-        is_left = (button & 0x03) == 0
+        btn_id = button & 0x03
         is_motion = (button & 32) != 0
+        is_scroll = (button & 64) != 0
 
-        if is_left and pressed and not is_motion:
+        # Scroll wheel zoom
+        if is_scroll and pressed:
+            if btn_id == 0:  # scroll up
+                camera.distance *= (1 - self.zoom_sensitivity)
+            elif btn_id == 1:  # scroll down
+                camera.distance *= (1 + self.zoom_sensitivity)
+            camera.distance = max(0.1, camera.distance)
+            return
+
+        is_left = btn_id == 0
+        is_right = btn_id == 2
+
+        if pressed and not is_motion:
             # Mouse down
-            self.dragging = True
+            if is_left:
+                self.left_dragging = True
+            elif is_right:
+                self.right_dragging = True
             self.last_col = col
             self.last_row = row
-        elif is_left and is_motion and pressed and self.dragging:
-            # Drag
+        elif is_motion and pressed:
             dx = col - self.last_col
             dy = row - self.last_row
-            camera.azimuth -= dx * self.sensitivity
-            camera.elevation -= dy * self.sensitivity
-            camera.elevation = max(-90, min(90, camera.elevation))
+            if self.left_dragging:
+                # Orbit
+                camera.azimuth -= dx * self.orbit_sensitivity
+                camera.elevation -= dy * self.orbit_sensitivity
+                camera.elevation = max(-90, min(90, camera.elevation))
+            elif self.right_dragging:
+                # Pan — move lookat in camera-local right/up directions
+                az = np.radians(camera.azimuth)
+                el = np.radians(camera.elevation)
+                right = np.array([-np.sin(az), np.cos(az), 0])
+                up = np.array([
+                    -np.cos(az) * np.sin(el),
+                    -np.sin(az) * np.sin(el),
+                    np.cos(el),
+                ])
+                scale = camera.distance * self.pan_sensitivity
+                camera.lookat[:] += (-dx * right + dy * up) * scale
             self.last_col = col
             self.last_row = row
-        elif not pressed and (button & 0x03) == 0:
-            # Mouse up
-            self.dragging = False
+        elif not pressed:
+            if is_left:
+                self.left_dragging = False
+            elif is_right:
+                self.right_dragging = False
 
 
 ORBIT_SENSITIVITY = 3.0
@@ -384,7 +418,7 @@ def main():
     }
     enc_label = f" [{args.encoding}]" if render_mode == "kitty" else ""
     print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}{enc_label}")
-    print(f"Drag to orbit | Space=pause | R=reset | Q=quit")
+    print(f"L-drag=orbit | R-drag=pan | Scroll=zoom | Space=pause | R=reset | Q=quit")
     time.sleep(1)
 
     # Load model
@@ -422,7 +456,7 @@ def main():
     kitty_display = KITTY_ENCODINGS[args.encoding]
 
     # Orbit controller
-    orbit = DirectOrbit(sensitivity=ORBIT_SENSITIVITY)
+    orbit = CameraController(orbit_sensitivity=ORBIT_SENSITIVITY)
 
     frame_interval = 1.0 / args.fps if args.fps > 0 else 0
     # Physics runs at real-time regardless of render FPS
