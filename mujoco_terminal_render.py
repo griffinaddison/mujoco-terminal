@@ -472,24 +472,18 @@ def main():
                 if cur_term_size != prev_term_size:
                     prev_term_size = cur_term_size
                     resize_pending = time.perf_counter()
-                if resize_pending:
-                    if time.perf_counter() - resize_pending > 0.15:
-                        resize_pending = None
-                        cur_term_size = shutil.get_terminal_size()
-                        if dynamic_cols:
-                            args.cols = cur_term_size.columns - 1
-                        sys.stdout.write("\033[2J\033[H")
-                        sys.stdout.flush()
-                        frame_id = 0
-                    else:
-                        # Skip rendering during resize
-                        continue
+                if resize_pending and time.perf_counter() - resize_pending > 0.15:
+                    resize_pending = None
+                    if dynamic_cols:
+                        args.cols = cur_term_size.columns - 1
+                    sys.stdout.write("\033[2J\033[H")
+                    sys.stdout.flush()
+                    frame_id = 0
 
                 pixels = render_frame(model, data, renderer, camera)
-                kitty_cols = shutil.get_terminal_size().columns
 
                 if render_mode == "kitty":
-                    kitty_display(pixels, frame_id, display_cols=kitty_cols)
+                    kitty_display(pixels, frame_id, display_cols=cur_term_size.columns)
                 elif render_mode == "block":
                     display_halfblock(pixels, args.cols, frame_id)
                 else:
