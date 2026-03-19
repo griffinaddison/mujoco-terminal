@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["mujoco_terminal_render.py"]
+only-include = ["mujoco_terminal_render.py", "demo.py"]
 
 [project.scripts]
-mujoco-terminal = "mujoco_terminal_render:main"
+mujoco-terminal = "demo:main"
