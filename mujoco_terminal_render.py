@@ -110,7 +110,16 @@ def parse_mouse_events(data):
 # ── Camera controllers ───────────────────────────────────────────────────────
 
 class CameraController:
-    """Handles orbit (left-drag), pan (right-drag), and zoom (scroll)."""
+    """Handles orbit, pan, zoom, body selection, and perturbation forces.
+
+    Controls:
+        Left-drag:        Orbit camera
+        Right-drag:       Pan camera
+        Scroll:           Zoom
+        Double-click:     Select body
+        Ctrl+left-drag:   Apply torque to selected body
+        Ctrl+right-drag:  Apply force to selected body
+    """
 
     def __init__(self, orbit_sensitivity=0.5, pan_sensitivity=0.02, zoom_sensitivity=0.15):
         self.orbit_sensitivity = orbit_sensitivity
@@ -120,14 +129,26 @@ class CameraController:
         self.right_dragging = False
         self.last_col = 0
         self.last_row = 0
+        # Double-click detection
+        self._last_click_time = 0
+        self._last_click_col = 0
+        self._last_click_row = 0
+        self._double_click_threshold = 0.4  # seconds
+        # Perturbation state
+        self.ctrl_dragging = False
+        self.perturb_active = False  # True while Ctrl+drag is in progress
 
-    def handle_event(self, button, col, row, pressed, camera):
+    def handle_event(self, button, col, row, pressed, camera,
+                     model=None, data=None, pert=None, scn=None, opt=None,
+                     viewport_width=640, viewport_height=480,
+                     display_cols=None, display_rows=None):
         if isinstance(button, str):
             return
 
         btn_id = button & 0x03
         is_motion = (button & 32) != 0
         is_scroll = (button & 64) != 0
+        is_ctrl = (button & 16) != 0
 
         # Scroll wheel zoom
         if is_scroll and pressed:
@@ -143,16 +164,50 @@ class CameraController:
 
         if pressed and not is_motion:
             # Mouse down
-            if is_left:
-                self.left_dragging = True
-            elif is_right:
-                self.right_dragging = True
+            if is_ctrl and pert is not None and pert.select > 0:
+                # Ctrl+click with a selected body — start perturbation
+                self.ctrl_dragging = True
+                self.perturb_active = True
+                if is_left:
+                    pert.active = int(mujoco.mjtPertBit.mjPERT_ROTATE)
+                elif is_right:
+                    pert.active = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
+                if scn is not None:
+                    mujoco.mjv_initPerturb(model, data, scn, pert)
+            else:
+                # Normal click — check for double-click (body selection)
+                if is_left and not is_ctrl:
+                    now = time.perf_counter()
+                    dt = now - self._last_click_time
+                    dist = abs(col - self._last_click_col) + abs(row - self._last_click_row)
+                    if dt < self._double_click_threshold and dist < 3:
+                        # Double-click — select body
+                        self._select_body(col, row, model, data, pert, scn, opt,
+                                          camera, viewport_width, viewport_height,
+                                          display_cols, display_rows)
+                    self._last_click_time = now
+                    self._last_click_col = col
+                    self._last_click_row = row
+                if is_left:
+                    self.left_dragging = True
+                elif is_right:
+                    self.right_dragging = True
             self.last_col = col
             self.last_row = row
         elif is_motion and pressed:
             dx = col - self.last_col
             dy = row - self.last_row
-            if self.left_dragging:
+            if self.ctrl_dragging and pert is not None and scn is not None:
+                # Perturbation drag
+                reldx = dx / viewport_height * 20  # scale for terminal cells
+                reldy = -dy / viewport_height * 20
+                if pert.active & int(mujoco.mjtPertBit.mjPERT_ROTATE):
+                    mujoco.mjv_movePerturb(model, data, mujoco.mjtMouse.mjMOUSE_ROTATE_V,
+                                           reldx, reldy, scn, pert)
+                elif pert.active & int(mujoco.mjtPertBit.mjPERT_TRANSLATE):
+                    mujoco.mjv_movePerturb(model, data, mujoco.mjtMouse.mjMOUSE_MOVE_V,
+                                           reldx, reldy, scn, pert)
+            elif self.left_dragging:
                 # Orbit
                 camera.azimuth -= dx * self.orbit_sensitivity
                 camera.elevation -= dy * self.orbit_sensitivity
@@ -172,10 +227,46 @@ class CameraController:
             self.last_col = col
             self.last_row = row
         elif not pressed:
+            if self.ctrl_dragging:
+                self.ctrl_dragging = False
+                self.perturb_active = False
+                if pert is not None:
+                    pert.active = 0
             if is_left:
                 self.left_dragging = False
             elif is_right:
                 self.right_dragging = False
+
+    def _select_body(self, col, row, model, data, pert, scn, opt, camera,
+                     viewport_width, viewport_height, display_cols, display_rows):
+        """Select a body under the terminal cursor via ray-casting."""
+        if model is None or pert is None or scn is None or opt is None:
+            return
+
+        # Map terminal cell to normalized viewport coordinates [0, 1]
+        if display_cols and display_rows:
+            relx = col / display_cols
+            rely = 1.0 - (row / display_rows)  # terminal y is top-down, viewport is bottom-up
+        else:
+            relx = col / 80
+            rely = 1.0 - (row / 24)
+
+        relx = max(0.0, min(1.0, relx))
+        rely = max(0.0, min(1.0, rely))
+
+        aspect = viewport_width / viewport_height
+        selpnt = np.zeros(3, dtype=np.float64)
+        geomid = np.zeros(1, dtype=np.int32)
+        flexid = np.zeros(1, dtype=np.int32)
+        skinid = np.zeros(1, dtype=np.int32)
+
+        body_id = mujoco.mjv_select(model, data, opt, aspect, relx, rely,
+                                     scn, selpnt, geomid, flexid, skinid)
+        if body_id >= 0:
+            pert.select = body_id
+            pert.localpos[:] = selpnt
+        else:
+            pert.select = 0
 
 
 ORBIT_SENSITIVITY = 3.0
@@ -377,7 +468,8 @@ def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,
     }
     enc_label = f" [{encoding}]" if render_mode == "kitty" else ""
     print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}{enc_label}")
-    print(f"L-drag=orbit | R-drag=pan | Scroll=zoom | Space=pause | R=reset | Q=quit")
+    print(f"L-drag=orbit | R-drag=pan | Scroll=zoom | DblClick=select body")
+    print(f"Ctrl+L-drag=torque | Ctrl+R-drag=force | Space=pause | R=reset | Q=quit")
     time.sleep(1)
 
     # Ensure offscreen framebuffer is large enough for requested resolution
@@ -406,6 +498,11 @@ def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,
     # Kitty encoding function
     kitty_display = KITTY_ENCODINGS[encoding]
 
+    # Perturbation and scene objects
+    pert = mujoco.MjvPerturb()
+    opt = mujoco.MjvOption()
+    scn = mujoco.MjvScene(model, maxgeom=1000)
+
     # Camera controller
     controller = CameraController(orbit_sensitivity=ORBIT_SENSITIVITY)
 
@@ -419,6 +516,7 @@ def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,
     fps_smooth = fps  # exponential moving average
     frame_times = [] if benchmark else None
     resize_pending = None
+    cur_term_size = prev_term_size
 
     # Clear screen
     sys.stdout.write("\033[2J\033[H")
@@ -442,12 +540,28 @@ def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,
                         elif ev[0] == "pause":
                             paused = not paused
                         else:
-                            controller.handle_event(*ev, camera)
+                            controller.handle_event(
+                                *ev, camera,
+                                model=model, data=data, pert=pert,
+                                scn=scn, opt=opt,
+                                viewport_width=width, viewport_height=height,
+                                display_cols=cur_term_size.columns,
+                                display_rows=cur_term_size.lines,
+                            )
+
+                # Update scene for perturbation ray-casting
+                mujoco.mjv_updateScene(
+                    model, data, opt, pert, camera,
+                    mujoco.mjtCatBit.mjCAT_ALL, scn,
+                )
 
                 # Step physics to keep up with real time
                 if not paused:
                     wall_elapsed = time.perf_counter() - t_start
                     while sim_time < wall_elapsed:
+                        # Apply perturbation forces before each step
+                        if controller.perturb_active:
+                            mujoco.mjv_applyPerturbForce(model, data, pert)
                         mujoco.mj_step(model, data)
                         sim_time += physics_dt
 
@@ -493,6 +607,9 @@ def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,
                 wall_elapsed = t_now - t_start
                 realtime_factor = sim_time / wall_elapsed if wall_elapsed > 0 else 0
                 status = f" FPS: {fps_smooth:5.1f} | Sim: {sim_time:6.2f}s | RT: {realtime_factor:.2f}x "
+                if pert.select > 0:
+                    body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, pert.select)
+                    status += f"| Body: {body_name or pert.select} "
                 if paused:
                     status += "| PAUSED "
                 # Write status line below render area
