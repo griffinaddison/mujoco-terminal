@@ -513,8 +513,6 @@ def main():
                     sys.stdout.write("\033[2J\033[H")
                     sys.stdout.flush()
                     frame_id = 0
-                    # Reset physics clock so we don't burst catching up
-                    t_start = time.perf_counter() - sim_time
 
                 # Cap cols so rendered height fits in terminal
                 term_rows = cur_term_size.lines - 1  # leave room for status
