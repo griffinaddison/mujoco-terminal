@@ -18,7 +18,7 @@ class DevNull:
     def flush(self): pass
 
 # Import the display functions from the main module
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 PENDULUM_XML = """
 <mujoco model="pendulum">

@@ -30,29 +30,34 @@ class RawTerminal:
     def __init__(self):
         self.fd = sys.stdin.fileno()
         self.old_settings = None
+        self.is_tty = os.isatty(self.fd)
 
     def __enter__(self):
-        self.old_settings = termios.tcgetattr(self.fd)
-        tty.setraw(self.fd)
-        # Enable SGR extended mouse reporting (button events + drag)
-        sys.stdout.write("\033[?1003h")  # all motion tracking
-        sys.stdout.write("\033[?1006h")  # SGR extended format
-        sys.stdout.write("\033[?25l")    # hide cursor
-        sys.stdout.flush()
+        if self.is_tty:
+            self.old_settings = termios.tcgetattr(self.fd)
+            tty.setraw(self.fd)
+            # Enable SGR extended mouse reporting (button events + drag)
+            sys.stdout.write("\033[?1003h")  # all motion tracking
+            sys.stdout.write("\033[?1006h")  # SGR extended format
+            sys.stdout.write("\033[?25l")    # hide cursor
+            sys.stdout.flush()
         return self
 
     def __exit__(self, *args):
-        # Disable mouse reporting, show cursor, restore terminal
-        sys.stdout.write("\033[?1003l")
-        sys.stdout.write("\033[?1006l")
-        sys.stdout.write("\033[?25h")
-        sys.stdout.write("\033[0m")
-        sys.stdout.flush()
-        if self.old_settings:
-            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+        if self.is_tty:
+            # Disable mouse reporting, show cursor, restore terminal
+            sys.stdout.write("\033[?1003l")
+            sys.stdout.write("\033[?1006l")
+            sys.stdout.write("\033[?25h")
+            sys.stdout.write("\033[0m")
+            sys.stdout.flush()
+            if self.old_settings:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
 
     def read_available(self):
         """Read all available bytes without blocking."""
+        if not self.is_tty:
+            return b""
         data = b""
         while select.select([self.fd], [], [], 0)[0]:
             data += os.read(self.fd, 1024)
@@ -352,6 +357,8 @@ def main():
     parser.add_argument("--xml", type=str, default=None, help="Path to MuJoCo XML model")
     parser.add_argument("--scene", type=str, default="pendulum", choices=list(SCENES.keys()),
                         help="Built-in scene (default: pendulum)")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Output JSON benchmark stats to stderr on exit")
     args = parser.parse_args()
 
     # Determine render mode
@@ -416,9 +423,10 @@ def main():
     frame_id = 0
     paused = False
     sim_time = 0.0
-    t_start = time.time()
+    t_start = time.perf_counter()
     t_last_frame = t_start
     fps_smooth = args.fps  # exponential moving average
+    frame_times = [] if args.benchmark else None
 
     # Clear screen
     sys.stdout.write("\033[2J\033[H")
@@ -446,7 +454,7 @@ def main():
 
                 # Step physics to keep up with real time
                 if not paused:
-                    wall_elapsed = time.time() - t_start
+                    wall_elapsed = time.perf_counter() - t_start
                     while sim_time < wall_elapsed:
                         mujoco.mj_step(model, data)
                         sim_time += physics_dt
@@ -462,8 +470,10 @@ def main():
                     display_ascii(pixels, args.cols, frame_id)
 
                 # Metrics
-                t_now = time.time()
+                t_now = time.perf_counter()
                 dt = t_now - t_last_frame
+                if frame_times is not None:
+                    frame_times.append(dt)
                 instant_fps = 1.0 / dt if dt > 0 else 0
                 fps_smooth = fps_smooth * 0.9 + instant_fps * 0.1
                 wall_elapsed = t_now - t_start
@@ -484,17 +494,37 @@ def main():
 
                 if frame_interval > 0:
                     expected = t_start + frame_id * frame_interval
-                    sleep_time = expected - time.time()
+                    sleep_time = expected - time.perf_counter()
                     if sleep_time > 0:
                         time.sleep(sleep_time)
 
         except KeyboardInterrupt:
             pass
 
-    elapsed = time.time() - t_start
+    elapsed = time.perf_counter() - t_start
     avg_fps = frame_id / elapsed if elapsed > 0 else 0
     sys.stdout.write("\n\n")
     print(f"Done — {frame_id} frames in {elapsed:.1f}s ({avg_fps:.1f} FPS avg)")
+
+    if frame_times is not None and len(frame_times) > 1:
+        import json
+        ft = np.array(frame_times[1:])  # skip first frame (warmup)
+        fps_arr = 1.0 / ft[ft > 0]
+        stats = {
+            "mode": render_mode,
+            "encoding": args.encoding if render_mode == "kitty" else None,
+            "resolution": f"{args.width}x{args.height}",
+            "frames": len(fps_arr),
+            "duration_s": round(elapsed, 2),
+            "fps_mean": round(float(np.mean(fps_arr)), 2),
+            "fps_std": round(float(np.std(fps_arr)), 2),
+            "fps_p1": round(float(np.percentile(fps_arr, 1)), 2),
+            "fps_p99": round(float(np.percentile(fps_arr, 99)), 2),
+            "frame_ms_mean": round(float(np.mean(ft)) * 1000, 2),
+            "frame_ms_std": round(float(np.std(ft)) * 1000, 2),
+        }
+        sys.stderr.write(json.dumps(stats) + "\n")
+
     renderer.close()
 
 
