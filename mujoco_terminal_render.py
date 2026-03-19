@@ -155,15 +155,18 @@ def render_frame(model, data, renderer, camera):
 def _kitty_chunked_write(payload, header_params, frame_id):
     """Write a kitty image protocol payload in chunks."""
     chunk_size = 4096
-    chunks = [payload[i:i + chunk_size] for i in range(0, len(payload), chunk_size)]
+    parts = []
     if frame_id > 0:
-        sys.stdout.write("\033[H")
-    for idx, chunk in enumerate(chunks):
-        m = 1 if idx < len(chunks) - 1 else 0
-        if idx == 0:
-            sys.stdout.write(f"\033_G{header_params},q=2,m={m};{chunk}\033\\")
+        parts.append("\033[H")
+    n = len(payload)
+    for start in range(0, n, chunk_size):
+        chunk = payload[start:start + chunk_size]
+        m = 1 if start + chunk_size < n else 0
+        if start == 0:
+            parts.append(f"\033_G{header_params},q=2,m={m};{chunk}\033\\")
         else:
-            sys.stdout.write(f"\033_Gm={m};{chunk}\033\\")
+            parts.append(f"\033_Gm={m};{chunk}\033\\")
+    sys.stdout.write("".join(parts))
     sys.stdout.flush()
 
 
@@ -233,11 +236,11 @@ def display_ascii(pixels, cols, frame_id=0):
     lines = []
     for row in indices:
         lines.append("".join(ascii_chars[i] for i in row))
-    art = "\n".join(lines)
+    art = "\r\n".join(lines)
     if frame_id > 0:
-        n_lines = art.count("\n") + 1
-        sys.stdout.write(f"\033[{n_lines}A")
-    sys.stdout.write(art + "\n")
+        n_lines = len(lines)
+        sys.stdout.write(f"\033[{n_lines}A\r")
+    sys.stdout.write(art + "\r\n")
     sys.stdout.flush()
 
 
@@ -248,22 +251,31 @@ def display_halfblock(pixels, cols, frame_id=0):
     char_rows = int(cols * aspect * 0.45)
     pixel_rows = char_rows * 2
     img_resized = img.resize((cols, pixel_rows))
-    arr = np.array(img_resized)
+    arr = np.array(img_resized, dtype=np.uint8)
+    # Grab top/bottom row pairs
+    top = arr[0::2]   # shape (char_rows, cols, 3)
+    bot = arr[1::2]
+    if top.shape[0] > bot.shape[0]:
+        bot = np.concatenate([bot, top[-1:]], axis=0)
+    # Flatten to lists for fast iteration (avoids numpy scalar overhead)
+    top_flat = top.reshape(-1, 3).tolist()
+    bot_flat = bot.reshape(-1, 3).tolist()
+    n_rows = top.shape[0]
     lines = []
-    for y in range(0, pixel_rows, 2):
-        line = []
-        top_row = arr[y]
-        bot_row = arr[y + 1] if y + 1 < pixel_rows else top_row
-        for x in range(cols):
-            tr, tg, tb = int(top_row[x][0]), int(top_row[x][1]), int(top_row[x][2])
-            br, bg, bb = int(bot_row[x][0]), int(bot_row[x][1]), int(bot_row[x][2])
-            line.append(f"\033[38;2;{tr};{tg};{tb};48;2;{br};{bg};{bb}m\u2580")
-        lines.append("".join(line) + "\033[0m")
-    art = "\n".join(lines)
+    idx = 0
+    for _ in range(n_rows):
+        parts = []
+        for _ in range(cols):
+            tr, tg, tb = top_flat[idx]
+            br, bg, bb = bot_flat[idx]
+            parts.append(f"\033[38;2;{tr};{tg};{tb};48;2;{br};{bg};{bb}m\u2580")
+            idx += 1
+        lines.append("".join(parts) + "\033[0m")
+    art = "\r\n".join(lines)
     if frame_id > 0:
-        n_lines = art.count("\n") + 1
-        sys.stdout.write(f"\033[{n_lines}A")
-    sys.stdout.write(art + "\n")
+        n_lines = len(lines)
+        sys.stdout.write(f"\033[{n_lines}A\r")
+    sys.stdout.write(art + "\r\n")
     sys.stdout.flush()
 
 
@@ -349,7 +361,7 @@ def main():
         render_mode = args.mode
 
     if render_mode != "kitty" and args.cols is None:
-        args.cols = min(shutil.get_terminal_size().columns, 120)
+        args.cols = min(shutil.get_terminal_size().columns - 1, 120)
 
     mode_names = {
         "kitty": "Kitty image protocol",
