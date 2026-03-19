@@ -137,6 +137,9 @@ class CameraController:
         # Perturbation state
         self.ctrl_dragging = False
         self.perturb_active = False  # True while Ctrl+drag is in progress
+        # Image area in terminal cells (updated each frame by the render loop)
+        self.image_cols = 80
+        self.image_rows = 24
 
     def handle_event(self, button, col, row, pressed, camera,
                      model=None, data=None, pert=None, scn=None, opt=None,
@@ -244,12 +247,9 @@ class CameraController:
             return
 
         # Map terminal cell to normalized viewport coordinates [0, 1]
-        if display_cols and display_rows:
-            relx = col / display_cols
-            rely = 1.0 - (row / display_rows)  # terminal y is top-down, viewport is bottom-up
-        else:
-            relx = col / 80
-            rely = 1.0 - (row / 24)
+        # Use the actual image area, not the full terminal
+        relx = col / self.image_cols
+        rely = 1.0 - (row / self.image_rows)  # terminal y is top-down, viewport is bottom-up
 
         relx = max(0.0, min(1.0, relx))
         rely = max(0.0, min(1.0, rely))
@@ -587,14 +587,21 @@ def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,
                 if render_mode == "kitty":
                     max_cols = int(term_rows / img_aspect * 2)
                     display_cols = min(cur_term_size.columns, max_cols)
+                    # Image height in rows: display_cols * img_aspect / 2 (cell aspect ~2:1)
+                    controller.image_cols = display_cols
+                    controller.image_rows = int(display_cols * img_aspect / 2)
                     kitty_display(pixels, frame_id, display_cols=display_cols)
                 elif render_mode == "block":
                     max_cols = int(term_rows / (img_aspect * 0.45))
                     capped_cols = min(cols, max_cols)
+                    controller.image_cols = capped_cols
+                    controller.image_rows = int(capped_cols * img_aspect * 0.45)
                     display_halfblock(pixels, capped_cols, frame_id)
                 else:
                     max_cols = int(term_rows / (img_aspect * 0.45))
                     capped_cols = min(cols, max_cols)
+                    controller.image_cols = capped_cols
+                    controller.image_rows = int(capped_cols * img_aspect * 0.45)
                     display_ascii(pixels, capped_cols, frame_id)
 
                 # Metrics
