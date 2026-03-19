@@ -367,9 +367,10 @@ def main():
     else:
         render_mode = args.mode
 
-    dynamic_cols = render_mode != "kitty" and args.cols is None
-    if dynamic_cols:
+    dynamic_cols = args.cols is None
+    if dynamic_cols and render_mode != "kitty":
         args.cols = shutil.get_terminal_size().columns - 1
+    prev_term_size = shutil.get_terminal_size()
 
     mode_names = {
         "kitty": "Kitty image protocol",
@@ -460,14 +461,15 @@ def main():
                         mujoco.mj_step(model, data)
                         sim_time += physics_dt
 
-                # Render
-                if dynamic_cols:
-                    new_cols = shutil.get_terminal_size().columns - 1
-                    if new_cols != args.cols:
-                        args.cols = new_cols
-                        sys.stdout.write("\033[2J\033[H")
-                        sys.stdout.flush()
-                        frame_id = 0
+                # Render — detect terminal resize
+                cur_term_size = shutil.get_terminal_size()
+                if cur_term_size != prev_term_size:
+                    prev_term_size = cur_term_size
+                    if dynamic_cols and render_mode != "kitty":
+                        args.cols = cur_term_size.columns - 1
+                    sys.stdout.write("\033[2J\033[H")
+                    sys.stdout.flush()
+                    frame_id = 0
                 pixels = render_frame(model, data, renderer, camera)
 
                 if render_mode == "kitty":
