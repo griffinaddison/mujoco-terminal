@@ -170,7 +170,7 @@ class CameraController:
                     np.cos(el),
                 ])
                 scale = camera.distance * self.pan_sensitivity
-                camera.lookat[:] += (dx * right - dy * up) * scale
+                camera.lookat[:] += (dx * right + dy * up) * scale
             self.last_col = col
             self.last_row = row
         elif not pressed:
