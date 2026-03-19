@@ -352,7 +352,7 @@ def main():
     parser.add_argument("--cols", type=int, default=None, help="Terminal columns (default: auto)")
     parser.add_argument("--fps", type=float, default=60, help="Target FPS (0=uncapped)")
     parser.add_argument("--duration", type=float, default=0, help="Duration in seconds (0=infinite)")
-    parser.add_argument("--encoding", choices=list(KITTY_ENCODINGS.keys()), default="png",
+    parser.add_argument("--encoding", choices=list(KITTY_ENCODINGS.keys()), default="raw-zlib",
                         help="Kitty image encoding: png (default), png-fast (no compression), raw (uncompressed RGB), raw-zlib (zlib-compressed RGB)")
     parser.add_argument("--xml", type=str, default=None, help="Path to MuJoCo XML model")
     parser.add_argument("--scene", type=str, default="pendulum", choices=list(SCENES.keys()),
