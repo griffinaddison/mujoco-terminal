@@ -275,7 +275,7 @@ ORBIT_SENSITIVITY = 3.0
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
 def render_frame(model, data, renderer, camera, scene_option=None, perturb=None):
-    renderer.update_scene(data, camera, scene_option=scene_option, scene_perturb=perturb)
+    renderer.update_scene(data, camera, scene_option=scene_option)
     pixels = renderer.render()
     return pixels
 
