@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mujoco-terminal"
-version = "0.1.0"
+version = "0.2.0"
 description = "MuJoCo renderer for terminal output via Kitty image protocol or ASCII"
 requires-python = ">=3.9"
 license = "MIT"
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["mujoco_terminal_render.py", "demo.py"]
+only-include = ["mujoco_terminal/", "demo.py"]
 
 [project.scripts]
 mujoco-terminal = "demo:main"

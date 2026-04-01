@@ -84,7 +84,7 @@ def main():
     sys.stdout = DevNull()
 
     # Import display functions
-    import mujoco_terminal_render as mtr
+    import mujoco_terminal as mtr
 
     results = {}
 

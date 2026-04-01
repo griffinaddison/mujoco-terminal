@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Demo scenes for mujoco-terminal.
 
-Shows how to use mujoco_terminal_render.launch() with built-in scenes.
+Shows how to use mujoco_terminal.launch() with built-in scenes.
 
 Usage:
     python demo.py                          # default pendulum scene
@@ -15,7 +15,7 @@ import argparse
 import mujoco
 import numpy as np
 
-import mujoco_terminal_render as mtr
+import mujoco_terminal as mtr
 
 
 # ── Built-in scenes ──────────────────────────────────────────────────────────
