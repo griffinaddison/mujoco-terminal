@@ -6,10 +6,12 @@ import sys
 import os
 import io
 import time
+import atexit
 import base64
 import shutil
 import select
 import termios
+import threading
 import tty
 import mujoco
 import numpy as np
@@ -412,6 +414,351 @@ def display_halfblock(pixels, cols, frame_id=0):
     sys.stdout.flush()
 
 
+# ── Handle + launch_passive ──────────────────────────────────────────────────
+
+class Handle:
+    """Object returned by launch_passive(). Provides sync/close/is_running API."""
+
+    def __init__(self, model, data, renderer, cam, opt, pert, scn,
+                 controller, term, render_mode, kitty_display, width, height,
+                 cols, dynamic_cols, key_callback):
+        self._model = model
+        self._data = data
+        self._renderer = renderer
+        self._cam = cam
+        self._opt = opt
+        self._pert = pert
+        self._scn = scn
+        self._controller = controller
+        self._term = term
+        self._render_mode = render_mode
+        self._kitty_display = kitty_display
+        self._width = width
+        self._height = height
+        self._cols = cols
+        self._dynamic_cols = dynamic_cols
+        self._key_callback = key_callback
+
+        self._lock = threading.Lock()
+        self._running = True
+        self._frame_id = 0
+        self._paused = False
+        self._reset_requested = False
+        self._closed = False
+
+        # FPS tracking
+        self._fps_smooth = 30.0
+        self._t_last_frame = time.perf_counter()
+        self._t_start = time.perf_counter()
+
+        # Terminal resize debouncing
+        self._prev_term_size = shutil.get_terminal_size()
+        self._resize_pending = None
+
+        # Start background input thread
+        self._input_thread = threading.Thread(
+            target=self._input_loop, daemon=True
+        )
+        self._input_thread.start()
+
+        # Safety net: restore terminal on exit
+        self._atexit_registered = True
+        atexit.register(self._atexit_close)
+
+    # ── Properties ──────────────────────────────────────────────────────
+
+    @property
+    def cam(self):
+        return self._cam
+
+    @property
+    def opt(self):
+        return self._opt
+
+    @property
+    def perturb(self):
+        return self._pert
+
+    @property
+    def paused(self):
+        return self._paused
+
+    @paused.setter
+    def paused(self, value):
+        self._paused = value
+
+    @property
+    def perturb_active(self):
+        return self._controller.perturb_active
+
+    # ── Core API ────────────────────────────────────────────────────────
+
+    def is_running(self):
+        """True while the viewer is active."""
+        return self._running
+
+    def lock(self):
+        """Return the threading lock for external synchronization."""
+        return self._lock
+
+    def sync(self):
+        """Render current data state to terminal. Called after mj_step()."""
+        if not self._running:
+            return
+
+        with self._lock:
+            cur_term_size = shutil.get_terminal_size()
+
+            # Terminal resize detection (debounced)
+            if cur_term_size != self._prev_term_size:
+                self._prev_term_size = cur_term_size
+                self._resize_pending = time.perf_counter()
+            if self._resize_pending and time.perf_counter() - self._resize_pending > 0.15:
+                self._resize_pending = None
+                if self._dynamic_cols:
+                    self._cols = cur_term_size.columns - 1
+                sys.stdout.write("\033[2J\033[H")
+                sys.stdout.flush()
+                self._frame_id = 0
+
+            # Update scene for perturbation / selection ray-casting
+            mujoco.mjv_updateScene(
+                self._model, self._data, self._opt, self._pert, self._cam,
+                mujoco.mjtCatBit.mjCAT_ALL, self._scn,
+            )
+
+            # Cap cols so rendered height fits in terminal
+            term_rows = cur_term_size.lines - 1
+            img_aspect = self._height / self._width
+
+            pixels = render_frame(self._model, self._data, self._renderer,
+                                  self._cam, scene_option=self._opt,
+                                  perturb=self._pert)
+
+            if self._render_mode == "kitty":
+                max_cols = int(term_rows / img_aspect * 2)
+                display_cols = min(cur_term_size.columns, max_cols)
+                self._controller.image_cols = display_cols
+                self._controller.image_rows = int(display_cols * img_aspect / 2)
+                self._kitty_display(pixels, self._frame_id, display_cols=display_cols)
+            elif self._render_mode == "block":
+                max_cols = int(term_rows / (img_aspect * 0.45))
+                capped_cols = min(self._cols, max_cols)
+                self._controller.image_cols = capped_cols
+                self._controller.image_rows = int(capped_cols * img_aspect * 0.45)
+                display_halfblock(pixels, capped_cols, self._frame_id)
+            else:
+                max_cols = int(term_rows / (img_aspect * 0.45))
+                capped_cols = min(self._cols, max_cols)
+                self._controller.image_cols = capped_cols
+                self._controller.image_rows = int(capped_cols * img_aspect * 0.45)
+                display_ascii(pixels, capped_cols, self._frame_id)
+
+            # FPS / status line
+            t_now = time.perf_counter()
+            dt = t_now - self._t_last_frame
+            instant_fps = 1.0 / dt if dt > 0 else 0
+            self._fps_smooth = self._fps_smooth * 0.9 + instant_fps * 0.1
+            wall_elapsed = t_now - self._t_start
+            sim_time = self._data.time
+            realtime_factor = sim_time / wall_elapsed if wall_elapsed > 0 else 0
+            status = f" FPS: {self._fps_smooth:5.1f} | Sim: {sim_time:6.2f}s | RT: {realtime_factor:.2f}x "
+            if self._pert.select > 0:
+                body_name = mujoco.mj_id2name(
+                    self._model, mujoco.mjtObj.mjOBJ_BODY, self._pert.select)
+                status += f"| Body: {body_name or self._pert.select} "
+            if self._paused:
+                status += "| PAUSED "
+            sys.stdout.write(f"\033[0m\033[K{status}\r")
+            sys.stdout.flush()
+            self._t_last_frame = t_now
+
+        self._frame_id += 1
+
+    def close(self):
+        """Stop the input thread, restore terminal state, release resources."""
+        if self._closed:
+            return
+        self._closed = True
+        self._running = False
+
+        # Wait for input thread to finish
+        if self._input_thread.is_alive():
+            self._input_thread.join(timeout=1.0)
+
+        # Restore terminal
+        if self._term is not None:
+            self._term.__exit__(None, None, None)
+            self._term = None
+
+        # Release renderer
+        try:
+            self._renderer.close()
+        except Exception:
+            pass
+
+        # Unregister atexit
+        if self._atexit_registered:
+            atexit.unregister(self._atexit_close)
+            self._atexit_registered = False
+
+        sys.stdout.write("\n\n")
+        elapsed = time.perf_counter() - self._t_start
+        avg_fps = self._frame_id / elapsed if elapsed > 0 else 0
+        print(f"Done — {self._frame_id} frames in {elapsed:.1f}s ({avg_fps:.1f} FPS avg)")
+
+    def _atexit_close(self):
+        """Safety net: restore terminal on interpreter shutdown."""
+        if not self._closed and self._term is not None:
+            try:
+                self._term.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._term = None
+            self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    # ── Background input thread ─────────────────────────────────────────
+
+    def _input_loop(self):
+        """Read stdin in background, parse events, update camera."""
+        while self._running:
+            try:
+                raw = self._term.read_available()
+            except Exception:
+                break
+
+            if raw:
+                events = parse_mouse_events(raw)
+                for ev in events:
+                    if ev[0] == "quit":
+                        self._running = False
+                        return
+                    elif ev[0] == "reset":
+                        self._reset_requested = True
+                    elif ev[0] == "pause":
+                        self._paused = not self._paused
+                    else:
+                        with self._lock:
+                            cur_term_size = shutil.get_terminal_size()
+                            self._controller.handle_event(
+                                *ev, self._cam,
+                                model=self._model, data=self._data,
+                                pert=self._pert, scn=self._scn, opt=self._opt,
+                                viewport_width=self._width,
+                                viewport_height=self._height,
+                                display_cols=cur_term_size.columns,
+                                display_rows=cur_term_size.lines,
+                            )
+
+                    # Forward to user key_callback
+                    if self._key_callback is not None and isinstance(ev[0], str):
+                        try:
+                            self._key_callback(ev[0])
+                        except Exception:
+                            pass
+
+            time.sleep(0.01)  # 10ms to avoid busy-waiting
+
+
+def launch_passive(model, data, *, key_callback=None, mode="auto",
+                   width=640, height=480, encoding="raw-zlib",
+                   cols=None, camera=None):
+    """Launch a passive terminal viewer (non-blocking).
+
+    Returns a Handle that the caller uses to drive rendering via sync().
+
+    Usage:
+        import mujoco
+        import mujoco_terminal
+
+        model = mujoco.MjModel.from_xml_path("robot.xml")
+        data = mujoco.MjData(model)
+
+        with mujoco_terminal.launch_passive(model, data) as viewer:
+            while viewer.is_running():
+                mujoco.mj_step(model, data)
+                viewer.sync()
+
+    Args:
+        model: MjModel instance.
+        data: MjData instance.
+        key_callback: Optional callable(str) invoked on key events.
+        mode: Render mode -- "auto", "kitty", "block", or "ascii".
+        width: Offscreen render width in pixels.
+        height: Offscreen render height in pixels.
+        encoding: Kitty encoding -- "raw-zlib", "png", "png-fast", "raw", "jpeg".
+        cols: Terminal columns for block/ascii (None = auto-fit).
+        camera: MjvCamera instance. Uses a default free camera if not provided.
+
+    Returns:
+        Handle object with sync(), is_running(), close() methods.
+    """
+    # Determine render mode
+    if mode == "auto":
+        render_mode = "kitty" if supports_kitty() else "block"
+    else:
+        render_mode = mode
+
+    dynamic_cols = cols is None
+    if dynamic_cols and render_mode != "kitty":
+        cols = shutil.get_terminal_size().columns - 1
+
+    mode_names = {
+        "kitty": "Kitty image protocol",
+        "block": f"half-block color ({cols} cols)",
+        "ascii": f"ASCII ({cols} cols)",
+    }
+    enc_label = f" [{encoding}]" if render_mode == "kitty" else ""
+    print(f"MuJoCo Terminal Renderer — {mode_names[render_mode]}{enc_label}")
+    print(f"L-drag=orbit | R-drag=pan | Scroll=zoom | DblClick=select body")
+    print(f"Ctrl+L-drag=torque | Ctrl+R-drag=force | Space=pause | R=reset | Q=quit")
+    time.sleep(1)
+
+    # Ensure offscreen framebuffer is large enough
+    model.vis.global_.offwidth = max(model.vis.global_.offwidth, width)
+    model.vis.global_.offheight = max(model.vis.global_.offheight, height)
+
+    # Create renderer and scene objects
+    renderer = mujoco.Renderer(model, height=height, width=width)
+
+    if camera is None:
+        camera = mujoco.MjvCamera()
+        camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+        camera.distance = 3.0
+        camera.azimuth = 90
+        camera.elevation = -20
+        camera.lookat[:] = [0, 0, 0.8]
+
+    kitty_display = KITTY_ENCODINGS.get(encoding, display_kitty_raw_zlib)
+
+    pert = mujoco.MjvPerturb()
+    opt = mujoco.MjvOption()
+    scn = mujoco.MjvScene(model, maxgeom=1000)
+    controller = CameraController(orbit_sensitivity=ORBIT_SENSITIVITY)
+
+    # Enter raw terminal mode
+    term = RawTerminal()
+    term.__enter__()
+
+    # Clear screen
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+    handle = Handle(
+        model, data, renderer, camera, opt, pert, scn,
+        controller, term, render_mode, kitty_display,
+        width, height, cols, dynamic_cols, key_callback,
+    )
+
+    return handle
+
+
 # ── Library API ───────────────────────────────────────────────────────────────
 
 def launch(model, data=None, *, mode="auto", width=640, height=480, fps=60,
@@ -440,9 +787,56 @@ def launch(model, data=None, *, mode="auto", width=640, height=480, fps=60,
         cols: Terminal columns for block/ascii (None = auto-fit).
         camera: MjvCamera instance. Uses a default free camera if not provided.
     """
-    _run_viewer(model, data=data, mode=mode, width=width, height=height,
-                fps=fps, encoding=encoding, cols=cols, camera=camera,
-                benchmark=False, duration=0)
+    if data is None:
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+
+    viewer = launch_passive(model, data, mode=mode, width=width, height=height,
+                            encoding=encoding, cols=cols, camera=camera)
+
+    # Save initial state for reset
+    qpos0 = data.qpos.copy()
+    qvel0 = data.qvel.copy()
+
+    physics_dt = model.opt.timestep
+    frame_interval = 1.0 / fps if fps > 0 else 0
+    sim_time = 0.0
+    t_start = time.perf_counter()
+    frame_id = 0
+
+    try:
+        while viewer.is_running():
+            # Handle reset
+            if viewer._reset_requested:
+                viewer._reset_requested = False
+                data.qpos[:] = qpos0
+                data.qvel[:] = qvel0
+                sim_time = 0.0
+                mujoco.mj_forward(model, data)
+
+            # Step physics
+            if not viewer.paused:
+                wall_elapsed = time.perf_counter() - t_start
+                while sim_time < wall_elapsed:
+                    # Apply perturbation forces before each step
+                    if viewer.perturb_active:
+                        mujoco.mjv_applyPerturbForce(model, data, viewer.perturb)
+                    mujoco.mj_step(model, data)
+                    sim_time += physics_dt
+
+            viewer.sync()
+            frame_id += 1
+
+            # Frame rate limiting
+            if frame_interval > 0:
+                expected = t_start + frame_id * frame_interval
+                sleep_time = expected - time.perf_counter()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        viewer.close()
 
 
 def _run_viewer(model, *, data=None, mode="auto", width=640, height=480,

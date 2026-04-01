@@ -19,6 +19,12 @@ TerminalRenderer
 
 launch(model, data=None, *, ...)
     Launch an interactive terminal viewer (blocking).
+
+launch_passive(model, data, *, ...)
+    Launch a passive terminal viewer (non-blocking), returns a Handle.
+
+Handle
+    Object returned by launch_passive() with sync/close/is_running API.
 """
 
 from mujoco_terminal._render import (
@@ -31,6 +37,8 @@ from mujoco_terminal._render import (
     display_kitty_jpeg,
     display_ascii,
     launch,
+    launch_passive,
+    Handle,
     supports_kitty,
     KITTY_ENCODINGS,
     RawTerminal,
@@ -52,6 +60,8 @@ __all__ = [
     "display_kitty_jpeg",
     "display_ascii",
     "launch",
+    "launch_passive",
+    "Handle",
     "supports_kitty",
     "KITTY_ENCODINGS",
     "RawTerminal",
